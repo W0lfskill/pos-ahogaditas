@@ -7,13 +7,14 @@
 (() => {
 'use strict';
 const CFG = window.POS_CONFIG || {};
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 
 /* ================= utilidades ================= */
 const $ = s => document.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = new Intl.NumberFormat('es-MX', {style:'currency', currency:'MXN', minimumFractionDigits:0, maximumFractionDigits:2});
-const money = v => fmt.format(Number(v) || 0);
+const fmt2 = new Intl.NumberFormat('es-MX', {style:'currency', currency:'MXN', minimumFractionDigits:2, maximumFractionDigits:2});
+const money = v => { const n = Number(v) || 0; return Number.isInteger(Math.round(n * 100) / 100) ? fmt.format(n) : fmt2.format(n); };
 const r2 = v => Math.round((Number(v) || 0) * 100) / 100;
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = crypto.getRandomValues(new Uint8Array(1))[0] & 15; return (c === 'x' ? r : (r & 3 | 8)).toString(16); }));
 const hoyISO = () => new Date().toLocaleDateString('en-CA', {timeZone:'America/Monterrey'});
@@ -291,7 +292,7 @@ function vInicio(){
   const mias = lista.filter(o => r === 'mesero' || o.mesero_id === S.ses.staff.id || o.pendiente);
   const otras = r === 'mesero' ? [] : lista.filter(o => !mias.includes(o));
   const card = o => { const t = totales(o); return `<button class="card order" data-open="${esc(o.id)}">
-      <div class="row"><span class="tag ${o.tipo === 'mesa' ? 'mesa' : o.tipo === 'llevar' ? 'llevar' : 'app'}">${esc(CANAL[o.tipo])}</span>${o.pendiente ? '<span class="tag pend">Por enviar</span>' : ''}<span class="spacer"></span><span class="muted small">${o.folio ? 'Folio ' + o.folio : ''}</span></div>
+      <div class="row"><span class="tag ${o.tipo === 'mesa' ? 't-mesa' : o.tipo === 'llevar' ? 't-llevar' : 't-app'}">${esc(CANAL[o.tipo])}</span>${o.pendiente ? '<span class="tag pend">Por enviar</span>' : ''}<span class="spacer"></span><span class="muted small">${o.folio ? 'Folio ' + o.folio : ''}</span></div>
       <b>${esc(etiquetaOrden(o))}</b><div class="row"><span class="t num">${money(t.total)}</span><span class="spacer"></span><span class="muted small">${minsAgo(o.abierta_en)} min${otras.length || r !== 'mesero' ? ' · ' + esc(o.mesero || '') : ''}</span></div></button>`; };
   const errs = r !== 'mesero' && S.errores.length ? `<div class="banner crit">${S.errores.length} operación(es) hechas sin internet no se registraron. <button class="btn sm" data-act="verErrores">Ver</button></div>` : '';
   app().innerHTML = barra() + `<main>${errs}
@@ -365,7 +366,8 @@ function vOrden(){
         <div class="tot"><span>Total</span><b class="num">${money(t.total)}</b></div>
         <button class="btn pri big" data-act="guardar" ${o.nuevos.length ? '' : 'disabled'}>Guardar orden${o.nuevos.length ? ` (${o.nuevos.reduce((a, n) => a + n.cantidad, 0)} nuevo${o.nuevos.length > 1 ? 's' : ''})` : ''}</button>
         <div class="row"><button class="btn ok big" data-act="cobrar" style="flex:1" ${lineas.some(l => l.estado !== 'cancelado') ? '' : 'disabled'}>Cobrar</button>
-          ${!o.nueva ? `<button class="btn big" data-act="desc" title="Descuento (requiere autorización)">%</button><button class="btn big" data-act="cancelOrden" title="Cancelar orden">✕</button>` : ''}</div></div>
+          ${!o.nueva ? `<button class="btn big" data-act="desc" title="Descuento (requiere autorización)">%</button><button class="btn big" data-act="cancelOrden" title="Cancelar orden">✕</button>` : ''}</div>
+        <div class="row">${lineas.some(l => l.estado !== 'cancelado') ? `<button class="btn" data-act="cuenta" style="flex:1">Ver cuenta</button>` : ''}${!o.nueva && o.tipo === 'mesa' && !o.pendiente ? `<button class="btn" data-act="mover" style="flex:1">⇄ Cambiar o unir mesa</button>` : ''}</div></div>
     </aside></div></main>`;
   app().querySelectorAll('[data-cat]').forEach(b => b.onclick = () => { S.cat = b.dataset.cat; vOrden(); pintaSync(); });
   app().querySelectorAll('[data-prod]').forEach(b => b.onclick = () => tocaProducto(b.dataset.prod));
@@ -464,50 +466,57 @@ function confirmaPlataforma(o, t){
   dlg().querySelector('[data-x="si"]').onclick = () => enviaCobro(o, []);
 }
 function hojaCobro(o, t){
-  const pagos = []; let metodo = 'efectivo'; let monto = ''; let recibido = ''; let partes = 1;
+  const pagos = []; let metodo = 'efectivo'; let monto = ''; let recibido = ''; let partes = 1; let propSel = 0; let propOtra = '';
+  const conProp = S.ses.config?.propinas_activas !== false;
   const rest = () => r2(t.total - pagos.reduce((a, p) => a + p.monto, 0));
+  const propDe = m => propSel === 'otra' ? r2(Number(String(propOtra).replace(/[^0-9.]/g, '')) || 0) : r2(m * propSel / 100);
   const draw = () => {
-    const falta = rest(); const m = monto === '' ? falta : Number(monto); const rec = recibido === '' ? null : Number(recibido);
-    const cambio = metodo === 'efectivo' && rec != null ? r2(rec - m) : 0;
+    const falta = rest(); const m = monto === '' ? falta : Number(monto); const prop = conProp ? propDe(m) : 0; const rec = recibido === '' ? null : Number(recibido);
+    const cambio = metodo === 'efectivo' && rec != null ? r2(rec - m - prop) : 0;
     abreModal(`<div class="sheet"><div class="row"><h2 style="margin:0">Cobrar · ${esc(etiquetaOrden(o))}</h2><span class="spacer"></span><button class="btn sm" data-x="close">Cerrar</button></div>
       <div class="paybig num">${money(t.total)}</div>
-      ${pagos.length ? `<div class="paylist">${pagos.map((p, i) => `<div class="payrow"><span>${METODO[p.metodo]}${p.recibido ? ` · recibe ${money(p.recibido)}` : ''}</span><span class="num">${money(p.monto)} <button class="btn sm ghost" data-rm="${i}">quitar</button></span></div>`).join('')}
+      ${pagos.length ? `<div class="paylist">${pagos.map((p, i) => `<div class="payrow"><span>${METODO[p.metodo]}${p.propina ? ` · propina ${money(p.propina)}` : ''}${p.recibido ? ` · recibe ${money(p.recibido)}` : ''}</span><span class="num">${money(p.monto)} <button class="btn sm ghost" data-rm="${i}">quitar</button></span></div>`).join('')}
         <div class="payrow" style="background:var(--warn-bg);color:var(--warn)"><span>Falta</span><span class="num">${money(falta)}</span></div></div>` : ''}
       ${falta > 0 ? `<div class="opts">${['efectivo','tarjeta','transferencia'].map(k => `<button class="opt" data-m="${k}" aria-pressed="${metodo === k}">${METODO[k]}</button>`).join('')}</div>
+        ${conProp ? `<div class="row"><span class="muted" style="font-weight:600">Propina</span>${[[0,'Sin propina'],[10,'10 %'],[15,'15 %'],['otra','Otra']].map(([v, l]) => `<button class="chip" data-prop="${v}" aria-pressed="${propSel === v}">${l}${v && v !== 'otra' ? ' · ' + money(r2(m * v / 100)) : ''}</button>`).join('')}
+          ${propSel === 'otra' ? `<input class="cell" id="propO" inputmode="decimal" placeholder="$" value="${esc(propOtra)}" style="width:90px">` : ''}</div>` : ''}
         <div class="grid" style="grid-template-columns:1fr 1fr;gap:10px">
-          <label class="field">Monto de este pago<input class="big num" id="pm" inputmode="decimal" value="${esc(monto === '' ? falta : monto)}"></label>
-          ${metodo === 'efectivo' ? `<label class="field">Recibe<input class="big num" id="pr" inputmode="decimal" placeholder="${esc(m)}" value="${esc(recibido)}"></label>` : '<div></div>'}</div>
-        ${metodo === 'efectivo' ? `<div class="chips">${billetes(m).map(v => `<button class="chip" data-rec="${v}">${v === m ? 'Exacto' : money(v)}</button>`).join('')}</div>` : ''}
+          <label class="field">Monto de este pago (sin propina)<input class="big num" id="pm" inputmode="decimal" value="${esc(monto === '' ? falta : monto)}"></label>
+          ${metodo === 'efectivo' ? `<label class="field">Recibe${prop ? ' (cuenta + propina)' : ''}<input class="big num" id="pr" inputmode="decimal" placeholder="${esc(r2(m + prop))}" value="${esc(recibido)}"></label>` : `<div class="field">${prop ? `A cobrar en ${METODO[metodo].toLowerCase()}<b class="num" style="font:800 30px var(--display);color:var(--fg)">${money(r2(m + prop))}</b>` : ''}</div>`}</div>
+        ${metodo === 'efectivo' ? `<div class="chips">${billetes(r2(m + prop)).map(v => `<button class="chip" data-rec="${v}">${v === r2(m + prop) ? 'Exacto' : money(v)}</button>`).join('')}</div>` : ''}
         ${cambio > 0 ? `<div class="cambio">Cambio<b class="num">${money(cambio)}</b></div>` : ''}
-        ${cambio < 0 ? `<div class="banner crit">Lo recibido es menor que el monto.</div>` : ''}
+        ${cambio < 0 ? `<div class="banner crit">Lo recibido es menor que ${prop ? 'la cuenta más la propina' : 'el monto'}.</div>` : ''}
         <details><summary class="muted" style="padding:6px 0;cursor:pointer">Dividir cuenta</summary>
           <div class="row" style="margin-top:8px"><span>Entre</span><div class="stepper"><button data-p="-1">−</button><output class="num">${partes}</output><button data-p="1">+</button></div><span>personas: <b class="num">${money(r2(falta / partes))}</b> c/u</span>
           <button class="btn sm" data-x="usarParte">Cobrar una parte</button></div>
           <p class="note">También puedes cobrar con varias formas de pago: escribe el monto de este pago y toca “Agregar pago”.</p></details>` : ''}
-      <div class="foot">${falta > 0 ? `<button class="btn big" data-x="addPago">Agregar pago</button><button class="btn ok big" data-x="fin">Cobrar ${money(falta)}</button>` : `<button class="btn ok big" data-x="fin">Confirmar cobro</button>`}</div></div>`);
+      <div class="foot">${falta > 0 ? `<button class="btn big" data-x="addPago">Agregar pago</button><button class="btn ok big" data-x="fin">Cobrar ${money(r2(falta + (monto === '' ? prop : 0)))}</button>` : `<button class="btn ok big" data-x="fin">Confirmar cobro</button>`}</div></div>`);
     const d = dlg();
     d.querySelector('[data-x="close"]').onclick = cierraModal;
     d.querySelectorAll('[data-m]').forEach(b => b.onclick = () => { metodo = b.dataset.m; recibido = ''; draw(); });
     d.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => { pagos.splice(Number(b.dataset.rm), 1); monto = ''; draw(); });
     d.querySelectorAll('[data-rec]').forEach(b => b.onclick = () => { monto = $('#pm').value; recibido = b.dataset.rec; draw(); });
     d.querySelectorAll('[data-p]').forEach(b => b.onclick = () => { partes = Math.max(1, Math.min(20, partes + Number(b.dataset.p))); draw(); });
+    d.querySelectorAll('[data-prop]').forEach(b => b.onclick = () => { monto = $('#pm') ? $('#pm').value : monto; const v = b.dataset.prop; propSel = v === 'otra' ? 'otra' : Number(v); recibido = ''; draw(); });
+    const po = $('#propO'); if (po){ po.oninput = () => { propOtra = po.value; }; po.onchange = draw; }
     const pm = $('#pm'), pr = $('#pr');
     if (pm) pm.oninput = () => { monto = pm.value; };
     if (pr) pr.oninput = () => { recibido = pr.value; };
     if (pm) pm.onchange = draw; if (pr) pr.onchange = draw;
     const tomaPago = () => {
       const mm = r2(Number(String($('#pm').value).replace(/[^0-9.]/g, '')));
+      const pp = conProp ? propDe(mm) : 0;
       const rr = metodo === 'efectivo' && $('#pr') && $('#pr').value !== '' ? r2(Number(String($('#pr').value).replace(/[^0-9.]/g, ''))) : null;
       if (!(mm > 0) || mm > rest() + 0.001){ toast('Monto no válido.', true); return false; }
-      if (rr != null && rr < mm){ toast('Lo recibido es menor que el monto.', true); return false; }
-      pagos.push({metodo, monto: mm, recibido: rr ?? (metodo === 'efectivo' ? mm : null)}); monto = ''; recibido = ''; return true;
+      if (rr != null && rr < mm + pp){ toast('Lo recibido no alcanza.', true); return false; }
+      pagos.push({metodo, monto: mm, propina: pp, recibido: rr ?? (metodo === 'efectivo' ? r2(mm + pp) : null)}); monto = ''; recibido = ''; propSel = 0; propOtra = ''; return true;
     };
     const ap = d.querySelector('[data-x="addPago"]'); if (ap) ap.onclick = () => { if (tomaPago()) draw(); };
     const up = d.querySelector('[data-x="usarParte"]'); if (up) up.onclick = () => { monto = String(r2(rest() / partes)); partes = Math.max(1, partes - 1); draw(); };
     d.querySelector('[data-x="fin"]').onclick = () => {
       if (rest() > 0 && !tomaPago()) return;
       if (Math.abs(rest()) > 0.009){ toast('Los pagos no suman el total.', true); return draw(); }
-      enviaCobro(o, pagos.map(p => ({metodo: p.metodo, monto: p.monto, recibido: p.metodo === 'efectivo' ? p.recibido : null})));
+      enviaCobro(o, pagos.map(p => ({metodo: p.metodo, monto: p.monto, propina: p.propina || 0, recibido: p.metodo === 'efectivo' ? p.recibido : null})));
     };
   };
   draw();
@@ -517,26 +526,88 @@ function billetes(m){ // exacto + billetes con los que suele pagar el cliente
   return [...new Set(c)].filter(v => v >= m).sort((a, b) => a - b).slice(0, 5);
 }
 async function enviaCobro(o, pagos){
-  const cambio = r2(pagos.reduce((a, p) => a + (p.metodo === 'efectivo' && p.recibido ? p.recibido - p.monto : 0), 0));
+  const cambio = r2(pagos.reduce((a, p) => a + (p.metodo === 'efectivo' && p.recibido ? p.recibido - p.monto - (p.propina || 0) : 0), 0));
+  const propina = r2(pagos.reduce((a, p) => a + (p.propina || 0), 0));
   const params = {p_orden: o.id, p_pagos: pagos};
-  const fin = (offline) => {
+  const fin = (offline, ord) => {
     delete S.ordenes[o.id]; if (o.tipo === 'mesa') S.mesasOcupadas = S.mesasOcupadas.filter(m => m !== o.mesa);
+    const tk = ord || {...o, items: [...(o.items || [])], pagos, propina, total: totales(o).total, subtotal: totales(o).sub, descuento: totales(o).desc, estado: 'cobrada'};
     abreModal(`<div class="sheet" style="text-align:center"><h2>Cobrado ✓</h2><p class="muted">${esc(etiquetaOrden(o))}${offline ? ' · se registrará al volver el internet' : ''}</p>
-      ${cambio > 0 ? `<div class="cambio">Cambio a entregar<b class="num">${money(cambio)}</b></div>` : ''}<div class="foot"><button class="btn pri big" data-x="ok">Listo</button></div></div>`);
+      ${cambio > 0 ? `<div class="cambio">Cambio a entregar<b class="num">${money(cambio)}</b></div>` : ''}${propina > 0 ? `<p class="muted">Propina registrada: <b>${money(propina)}</b></p>` : ''}
+      <div class="foot"><button class="btn big" data-x="tk">Imprimir ticket</button><button class="btn pri big" data-x="ok">Listo</button></div></div>`);
+    dlg().querySelector('[data-x="tk"]').onclick = () => imprimeTicket(tk, true);
     dlg().querySelector('[data-x="ok"]').onclick = () => { cierraModal(); S.o = null; S.vista = 'inicio'; render(); };
   };
   if (pendientes() || !S.online){ encola('pos_cobrar', params); return fin(true); }
-  try { await call('pos_cobrar', params); fin(false); }
+  try { const r = await call('pos_cobrar', params); fin(false, r.orden); }
   catch(e){ if (e.code === 'RED'){ encola('pos_cobrar', params); return fin(true); } toast(e.message, true); }
 }
 
+/* ---------- pre-cuenta y ticket ---------- */
+function ticketTexto(o, pagado){
+  const cfg = S.ses.config || {}; const t = o.subtotal != null ? {sub: o.subtotal, desc: o.descuento, total: o.total} : totales(o);
+  const L = []; const W = 32; const pad = (a, b) => { a = String(a); b = String(b); return a.length + b.length + 1 > W ? a + '\n' + ' '.repeat(Math.max(0, W - b.length)) + b : a + ' '.repeat(W - a.length - b.length) + b; };
+  String(cfg.ticket_encabezado || 'Ahogaditas Tapatío').split('\n').forEach(x => L.push(x));
+  L.push('-'.repeat(W)); L.push(pagado ? 'TICKET' : 'CUENTA (no es comprobante de pago)'); L.push(`${etiquetaOrden(o)}${o.folio ? ' · Folio ' + o.folio : ''}`);
+  L.push(new Date().toLocaleString('es-MX', {dateStyle: 'short', timeStyle: 'short'}) + (o.mesero ? ' · ' + o.mesero : '')); L.push('-'.repeat(W));
+  (o.items || []).filter(i => i.estado !== 'cancelado').concat(o.nuevos || []).forEach(i => { L.push(pad(`${i.cantidad} ${i.nombre}`, money(i.cantidad * i.precio_unit))); if (i.variante) L.push('  ' + i.variante); });
+  L.push('-'.repeat(W));
+  if (t.desc) { L.push(pad('Subtotal', money(t.sub))); L.push(pad('Descuento', '-' + money(t.desc))); }
+  L.push(pad('TOTAL', money(t.total)));
+  if (pagado){ (o.pagos || []).forEach(p => L.push(pad(METODO[p.metodo] || p.metodo, money(p.monto)))); if (o.propina > 0) L.push(pad('Propina', money(o.propina)));
+    const camb = (o.pagos || []).reduce((a, p) => a + (Number(p.cambio) || (p.metodo === 'efectivo' && p.recibido ? p.recibido - p.monto - (p.propina || 0) : 0)), 0); if (camb > 0) L.push(pad('Cambio', money(camb))); }
+  else if (S.ses.config?.propinas_activas !== false) { L.push(pad('Propina sugerida 10 %', money(r2(t.total * .10)))); L.push(pad('Propina sugerida 15 %', money(r2(t.total * .15)))); }
+  L.push('Precios con IVA incluido'); L.push('-'.repeat(W)); String(cfg.ticket_pie || '¡Gracias por su visita!').split('\n').forEach(x => L.push(x));
+  return L.join('\n');
+}
+function imprimeTicket(o, pagado){
+  const txt = ticketTexto(o, pagado); const el = $('#printArea'); el.textContent = txt;
+  document.body.classList.add('imprimiendo'); setTimeout(() => { print(); setTimeout(() => document.body.classList.remove('imprimiendo'), 500); }, 50);
+}
+function preCuenta(){
+  const o = S.o; const txt = ticketTexto(o, false);
+  abreModal(`<div class="sheet"><div class="row"><h2 style="margin:0">Cuenta · ${esc(etiquetaOrden(o))}</h2><span class="spacer"></span><button class="btn sm" data-x="no">Cerrar</button></div>
+    <pre class="ticketprev">${esc(txt)}</pre>
+    ${o.nuevos?.length ? '<div class="banner">Hay productos sin guardar: se incluyen en la cuenta, pero guarda la orden antes de cobrar.</div>' : ''}
+    <div class="foot"><button class="btn big" data-x="share">Compartir</button><button class="btn pri big" data-x="print">Imprimir</button></div></div>`);
+  dlg().querySelector('[data-x="no"]').onclick = cierraModal;
+  dlg().querySelector('[data-x="print"]').onclick = () => imprimeTicket(o, false);
+  dlg().querySelector('[data-x="share"]').onclick = async () => {
+    if (navigator.share){ try { await navigator.share({title: 'Cuenta ' + etiquetaOrden(o), text: txt}); return; } catch(e){ if (e.name === 'AbortError') return; } }
+    location.href = 'https://wa.me/?text=' + encodeURIComponent(txt);
+  };
+}
+
+/* ---------- mover o unir mesa ---------- */
+function moverMesa(){
+  const o = S.o; const n = Number(S.ses.config?.mesas) || 10;
+  const mias = Object.values(S.ordenes).filter(x => x.id !== o.id && x.tipo === 'mesa' && !x.pendiente);
+  abreModal(`<div class="sheet"><div class="row"><h2 style="margin:0">Cambiar ${esc(etiquetaOrden(o))}</h2><span class="spacer"></span><button class="btn sm" data-x="no">Cerrar</button></div>
+    <h3 style="margin-top:0">Pasar a una mesa libre</h3>
+    <div class="grid mesas">${Array.from({length: n}, (_, i) => i + 1).filter(m => m !== o.mesa && !S.mesasOcupadas.includes(m)).map(m => `<button class="mesa" data-mv="${m}">${m}</button>`).join('') || '<div class="empty">No hay mesas libres.</div>'}</div>
+    <h3>Unir con otra mesa</h3><p class="muted small" style="margin-top:0">Los productos de esta orden se pasan a la otra y se cobra todo junto.</p>
+    <div class="grid cards">${mias.map(x => `<button class="card order" data-un="${esc(x.id)}"><b>${esc(etiquetaOrden(x))}</b><span class="num">${money(totales(x).total)}</span><span class="muted small">${esc(x.mesero || '')}</span></button>`).join('') || '<div class="empty">No hay otras mesas abiertas que puedas unir.</div>'}</div></div>`);
+  dlg().querySelector('[data-x="no"]').onclick = cierraModal;
+  dlg().querySelectorAll('[data-mv]').forEach(b => b.onclick = async () => {
+    try { const r = await call('pos_mover_orden', {p_orden: o.id, p_mesa: Number(b.dataset.mv)}); S.mesasOcupadas = S.mesasOcupadas.filter(m => m !== o.mesa).concat(r.orden.mesa);
+      S.ordenes[o.id] = r.orden; S.o = {...r.orden, items: [...r.orden.items], nuevos: o.nuevos}; cierraModal(); toast(`Ahora es la mesa ${r.orden.mesa}`); vOrden(); pintaSync(); }
+    catch(e){ toast(e.message, true); }
+  });
+  dlg().querySelectorAll('[data-un]').forEach(b => b.onclick = async () => {
+    if (o.nuevos?.length){ toast('Guarda primero los productos nuevos.', true); return; }
+    try { const r = await call('pos_unir_ordenes', {p_origen: o.id, p_destino: b.dataset.un}); delete S.ordenes[o.id]; S.mesasOcupadas = S.mesasOcupadas.filter(m => m !== o.mesa);
+      S.ordenes[r.orden.id] = r.orden; S.o = {...r.orden, items: [...r.orden.items], nuevos: []}; cierraModal(); toast(`Unida con ${etiquetaOrden(r.orden)}`); vOrden(); pintaSync(); }
+    catch(e){ toast(e.message, true); }
+  });
+}
+
 /* ---------- autorizaciones (encargada / admin) ---------- */
-function hojaAutoriza(titulo, detalle, motivos, extraHTML, onOk){
+function hojaAutoriza(titulo, detalle, motivos, extraHTML, onOk, onDraw){
   if (!S.online){ toast('Para autorizar se necesita internet.', true); return; }
   const aut = S.personal.filter(p => p.rol !== 'mesero' && p.es_demo === esDemo());
   let quien = aut.find(p => p.id === S.ses.staff.id)?.id || (aut.length === 1 ? aut[0].id : null); let motivo = ''; let pin = '';
   const draw = (msg) => {
-    abreModal(`<div class="sheet"><h2 style="margin:0">${esc(titulo)}</h2><p class="muted" style="margin:0">${esc(detalle)}</p>${extraHTML || ''}
+    abreModal(`<div class="sheet"><h2 style="margin:0">${esc(titulo)}</h2><p class="muted" style="margin:0">${esc(detalle)}</p>${(typeof extraHTML === 'function' ? extraHTML() : extraHTML) || ''}
       <div class="grp"><div class="gt">Motivo <span class="muted small">obligatorio</span></div><div class="chips">${motivos.map(m => `<button class="chip" data-mot="${esc(m)}" aria-pressed="${motivo === m}">${esc(m)}</button>`).join('')}</div>
         <input id="motl" style="margin-top:8px;font:17px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg);width:100%" maxlength="100" placeholder="Otro motivo…" value="${esc(motivos.includes(motivo) ? '' : motivo)}"></div>
       <div class="grp"><div class="gt">Autoriza</div><div class="opts">${aut.map(p => `<button class="opt" data-aut="${esc(p.id)}" aria-pressed="${quien === p.id}">${esc(p.nombre)}</button>`).join('')}</div>
@@ -548,6 +619,7 @@ function hojaAutoriza(titulo, detalle, motivos, extraHTML, onOk){
     d.querySelectorAll('[data-mot]').forEach(b => b.onclick = () => { keep(); motivo = b.dataset.mot; $('#motl').value = ''; draw(); });
     d.querySelectorAll('[data-aut]').forEach(b => b.onclick = () => { keep(); quien = b.dataset.aut; draw(); });
     d.querySelector('[data-x="no"]').onclick = cierraModal;
+    if (onDraw) onDraw(d);
     d.querySelector('[data-x="si"]').onclick = async () => {
       keep(); const libre = $('#motl').value.trim(); const mot = libre || motivo;
       if (mot.length < 3) return draw('Elige o escribe el motivo.');
@@ -560,13 +632,14 @@ function hojaAutoriza(titulo, detalle, motivos, extraHTML, onOk){
   draw();
 }
 function cancelarItem(itemId){
-  const i = S.o.items.find(x => x.id === itemId);
+  const i = S.o.items.find(x => x.id === itemId); let n = i.cantidad;
+  const extra = () => i.cantidad > 1 ? `<div class="grp"><div class="gt">¿Cuántos cancelar? <span class="muted small">de ${i.cantidad}</span></div><div class="stepper"><button data-cq="-1">−</button><output class="num" id="cqv">${n}</output><button data-cq="1">+</button></div></div>` : '';
   hojaAutoriza('Cancelar producto', `${i.cantidad}× ${i.nombre}${i.variante ? ' (' + i.variante + ')' : ''} · ${money(i.cantidad * i.precio_unit)}`,
-    ['Error de captura', 'Cliente cambió', 'Se acabó', 'Tardó mucho'], '', async (quien, pin, mot) => {
-      const r = await call('pos_cancelar_item', {p_item: itemId, p_autoriza: quien, p_pin: pin, p_motivo: mot});
-      if (r.ok){ S.ordenes[S.o.id] = r.orden; S.o = {...r.orden, items: [...r.orden.items], nuevos: S.o.nuevos}; toast('Producto cancelado'); vOrden(); pintaSync(); }
+    ['Error de captura', 'Cliente cambió', 'Se acabó', 'Tardó mucho'], extra, async (quien, pin, mot) => {
+      const r = await call('pos_cancelar_item', {p_item: itemId, p_autoriza: quien, p_pin: pin, p_motivo: mot, p_cantidad: n});
+      if (r.ok){ S.ordenes[S.o.id] = r.orden; S.o = {...r.orden, items: [...r.orden.items], nuevos: S.o.nuevos}; toast(n < i.cantidad ? `${n} cancelado(s)` : 'Producto cancelado'); vOrden(); pintaSync(); }
       return r;
-    });
+    }, d => d.querySelectorAll('[data-cq]').forEach(b => b.onclick = () => { n = Math.max(1, Math.min(i.cantidad, n + Number(b.dataset.cq))); $('#cqv').textContent = n; }));
 }
 function descuento(){
   const t = totales(S.o);
@@ -604,16 +677,18 @@ async function vCorte(){
       <div class="kpi"><div class="l">Órdenes cobradas</div><div class="v num">${d.ordenes}</div></div>
       <div class="kpi"><div class="l">Total del turno</div><div class="v num">${money(d.total)}</div></div>
       <div class="kpi"><div class="l">Cancelaciones</div><div class="v num">${d.cancelaciones}</div></div></div>
-    <div class="two"><div><h3>Por forma de pago</h3><div class="tbl"><table><tbody>${['efectivo','tarjeta','transferencia','plataforma'].map(k => `<tr><td>${METODO[k]}</td><td class="n">${money(pm[k] || 0)}</td></tr>`).join('')}</tbody></table></div></div>
+    <div class="two"><div><h3>Por forma de pago</h3><div class="tbl"><table><tbody>${['efectivo','tarjeta','transferencia','plataforma'].map(k => `<tr><td>${METODO[k]}</td><td class="n">${money(pm[k] || 0)}</td></tr>`).join('')}</tbody></table></div>
+      ${d.propinas ? `<h3>Propinas del turno · ${money(d.propinas)}</h3><div class="tbl"><table><tbody>${Object.entries(d.propinas_por_mesero || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="n">${money(v)}</td></tr>`).join('')}</tbody></table></div><p class="note">Las propinas no cuentan como venta. Las de tarjeta se pagan al mesero en efectivo desde la caja.</p>` : ''}</div>
     <div><h3>Efectivo</h3><div class="card grid">
       <label class="field">Fondo de caja al iniciar<input id="fondo" class="big num" inputmode="decimal" value="${esc(d.fondo_sugerido ?? 0)}"></label>
       <div class="tot"><span class="muted">+ Ventas en efectivo</span><span class="num">${money(d.efectivo)}</span></div>
+      ${d.propinas_efectivo ? `<div class="tot"><span class="muted">+ Propinas en efectivo</span><span class="num">${money(d.propinas_efectivo)}</span></div>` : ''}
       <div class="tot"><span>= Efectivo esperado</span><b class="num" id="esp"></b></div>
       <label class="field">Efectivo contado en caja<input id="cont" class="big num" inputmode="decimal" placeholder="0"></label>
       <div class="tot"><span>Diferencia</span><b class="num" id="dif">—</b></div>
       <label class="field">Notas<input id="cnot" maxlength="200"></label>
       <button class="btn pri big" id="cerrar">Cerrar corte</button></div></div></div>`;
-  const upd = () => { const f = Number($('#fondo').value) || 0, c = $('#cont').value; const esp = r2(f + d.efectivo); $('#esp').textContent = money(esp);
+  const upd = () => { const f = Number($('#fondo').value) || 0, c = $('#cont').value; const esp = r2(f + d.efectivo + (d.propinas_efectivo || 0)); $('#esp').textContent = money(esp);
     if (c === ''){ $('#dif').textContent = '—'; $('#dif').className = 'num'; return; } const df = r2(Number(c) - esp); $('#dif').textContent = (df > 0 ? '+' : '') + money(df); $('#dif').className = 'num ' + (df < 0 ? 'neg' : df > 0 ? 'pos' : ''); };
   $('#fondo').oninput = upd; $('#cont').oninput = upd; upd();
   $('#cerrar').onclick = async () => {
@@ -627,7 +702,7 @@ function pintaCorteHecho(){
   const c = corteRes; const pm = c.totales?.por_metodo || {};
   $('#cbody').innerHTML = `<div class="card" style="max-width:520px"><h2>Corte cerrado ✓</h2><p class="muted">${ftime(c.creado)} · ${esc(c.hecho_por)}</p>
     <div class="tbl"><table><tbody>${Object.entries(pm).map(([k, v]) => `<tr><td>${METODO[k] || k}</td><td class="n">${money(v)}</td></tr>`).join('')}
-    <tr><td><b>Total</b></td><td class="n"><b>${money(c.totales?.total)}</b></td></tr><tr><td>Fondo</td><td class="n">${money(c.fondo)}</td></tr>
+    <tr><td><b>Total</b></td><td class="n"><b>${money(c.totales?.total)}</b></td></tr>${c.totales?.propinas ? `<tr><td>Propinas (no son venta)</td><td class="n">${money(c.totales.propinas)}</td></tr>` : ''}<tr><td>Fondo</td><td class="n">${money(c.fondo)}</td></tr>
     <tr><td>Efectivo esperado</td><td class="n">${money(c.esperado)}</td></tr><tr><td>Efectivo contado</td><td class="n">${money(c.contado)}</td></tr>
     <tr><td><b>Diferencia</b></td><td class="n ${c.diferencia < 0 ? 'neg' : c.diferencia > 0 ? 'pos' : ''}"><b>${money(c.diferencia)}</b></td></tr></tbody></table></div>
     <div class="row noprint" style="margin-top:12px"><button class="btn" data-act="imprimir">Imprimir</button><button class="btn pri" id="cok">Listo</button></div></div>`;
@@ -647,10 +722,10 @@ function rango(k){
 async function vAdmin(){
   const A = S.admin; if (!A.desde) [A.desde, A.hasta] = rango('semana');
   if (rol() !== 'admin'){ S.vista = 'inicio'; return render(); }
-  const tabs = [['resumen','Ventas'],['productos','Por producto'],['inventario','Inventario'],['recetas','Recetas'],['cortes','Cortes'],['bitacora','Bitácora'],['personal','Personal'],['menu','Menú y precios'],['ajustes','Ajustes']];
+  const tabs = [['resumen','Ventas'],['productos','Por producto'],['costos','Costos y ganancia'],['inventario','Inventario'],['recetas','Recetas'],['cortes','Cortes'],['bitacora','Bitácora'],['personal','Personal'],['menu','Menú y precios'],['ajustes','Ajustes']];
   app().innerHTML = barra() + `<main><div class="row" style="margin-bottom:6px"><button class="btn" data-act="inicio">← POS</button><h1 style="margin:0">Panel de ventas</h1></div>
     <nav class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" aria-current="${A.tab === k}">${l}</button>`).join('')}</nav>
-    ${['resumen','productos','cortes','bitacora'].includes(A.tab) ? `<div class="row" style="margin-bottom:12px">
+    ${['resumen','productos','cortes','bitacora','costos'].includes(A.tab) ? `<div class="row" style="margin-bottom:12px">
       ${[['hoy','Hoy'],['ayer','Ayer'],['semana','Esta semana'],['semana_ant','Semana pasada'],['mes','Este mes']].map(([k, l]) => `<button class="chip" data-rg="${k}" aria-pressed="${rango(k)[0] === A.desde && rango(k)[1] === A.hasta}">${l}</button>`).join('')}
       <input type="date" id="dd" class="cell w" value="${A.desde}"> <span>a</span> <input type="date" id="dh" class="cell w" value="${A.hasta}">
       <label class="row small" style="gap:6px"><input type="checkbox" id="vdemo" ${A.demo ? 'checked' : ''} style="width:22px;height:22px"> Ver datos <span class="demo">DEMO</span></label></div>` : ''}
@@ -661,8 +736,16 @@ async function vAdmin(){
   if (dd) dd.onchange = () => { A.desde = dd.value; if (A.hasta < A.desde) A.hasta = A.desde; A.rep = A.bit = null; vAdmin(); };
   if (dh) dh.onchange = () => { A.hasta = dh.value; if (A.hasta < A.desde) A.desde = A.hasta; A.rep = A.bit = null; vAdmin(); };
   if (vd) vd.onchange = () => { A.demo = vd.checked; A.rep = A.bit = null; vAdmin(); };
-  try { await ({resumen: aResumen, productos: aProductos, inventario: aInventario, recetas: aRecetas, cortes: aCortes, bitacora: aBitacora, personal: aPersonal, menu: aMenu, ajustes: aAjustes}[A.tab])(); }
+  if (!A.respChk){ A.respChk = true; call('admin_config').then(c => { A.ultResp = c.ultimo_respaldo || null; if (S.vista === 'admin') pintaRecordatorio(); }).catch(() => {}); } else pintaRecordatorio();
+  try { await ({resumen: aResumen, productos: aProductos, inventario: aInventario, recetas: aRecetas, costos: aCostos, cortes: aCortes, bitacora: aBitacora, personal: aPersonal, menu: aMenu, ajustes: aAjustes}[A.tab])(); }
   catch(e){ $('#abody').innerHTML = `<div class="banner crit">${esc(e.message)}</div>`; }
+}
+function pintaRecordatorio(){
+  const A = S.admin; const dias = A.ultResp ? (Date.now() - new Date(A.ultResp).getTime()) / 864e5 : 999;
+  if (dias < 7 || $('#resprec')) return;
+  const el = document.createElement('div'); el.className = 'banner'; el.id = 'resprec';
+  el.innerHTML = `${A.ultResp ? `Tu último respaldo fue hace ${Math.floor(dias)} días.` : 'Todavía no has descargado ningún respaldo.'} <button class="btn sm" id="resbtn">Descargar respaldo ahora</button>`;
+  const nav = $('.tabs'); if (nav) nav.after(el); $('#resbtn').onclick = async () => { await respaldo(); A.ultResp = new Date().toISOString(); el.remove(); };
 }
 async function reporte(){ const A = S.admin; if (!A.rep) A.rep = await call('admin_reporte', {p_desde: A.desde, p_hasta: A.hasta, p_demo: A.demo}); return A.rep; }
 const tabla = (cols, rows, vacio) => rows.length ? `<div class="tbl"><table><thead><tr>${cols.map(c => `<th class="${c[2] || ''}">${c[0]}</th>`).join('')}</tr></thead><tbody>
@@ -686,13 +769,27 @@ async function aResumen(){
     <div class="two"><div><h3>Por día</h3>${r.por_dia.length ? barras(r.por_dia, d => fdate(d.fecha), d => d.ventas) : '<div class="empty">Sin ventas.</div>'}</div>
       <div><h3>Por mesero</h3>${tabla([['Mesero', x => esc(x.mesero)], ['Órdenes', x => x.ordenes, 'n'], ['Ticket', x => money(x.ticket), 'n'], ['Ventas', x => money(x.ventas), 'n']], r.por_mesero)}</div>
       <div><h3>Por forma de pago</h3>${tabla([['Forma', x => METODO[x.metodo] || x.metodo], ['Pagos', x => x.pagos, 'n'], ['Monto', x => money(x.monto), 'n']], r.por_metodo)}</div>
-      <div><h3>Por canal</h3>${tabla([['Canal', x => CANAL[x.canal] || x.canal], ['Órdenes', x => x.ordenes, 'n'], ['Ventas', x => money(x.ventas), 'n']], r.por_canal)}</div></div>
+      <div><h3>Por canal</h3>${tabla([['Canal', x => CANAL[x.canal] || x.canal], ['Órdenes', x => x.ordenes, 'n'], ['Ventas', x => money(x.ventas), 'n']], r.por_canal)}</div>
+      <div><h3>Propinas · ${money(r.propinas || 0)}</h3>${tabla([['Mesero', x => esc(x.mesero)], ['Propinas', x => money(x.propinas), 'n']], r.propinas_por_mesero || [], 'Sin propinas registradas.')}<p class="note">Las propinas no se suman a las ventas.</p></div></div>
+    <h3>¿Cuándo vendes más?</h3>${cuandoVendes(r)}
     <h3>Anular una venta ya cobrada</h3><div class="card row"><input type="date" id="anf" class="cell w" value="${hoyISO()}"><input id="anfo" class="cell" inputmode="numeric" placeholder="Folio"><input id="anm" class="cell w" style="width:240px" placeholder="Motivo"><button class="btn" id="anb">Anular venta</button>
       <span class="note" style="margin:0">Queda en la bitácora. Si ya entró a un corte, la diferencia se verá en ese corte.</span></div>`;
   $('#anb').onclick = async () => {
     try { await call('admin_anular_venta', {p_fecha: $('#anf').value, p_folio: Number($('#anfo').value), p_motivo: $('#anm').value}); toast('Venta anulada'); S.admin.rep = null; aResumen(); }
     catch(e){ toast(e.message, true); }
   };
+}
+const DSEM = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
+function cuandoVendes(r){
+  if (!r.por_hora?.length) return '<div class="empty">Sin ventas en este periodo.</div>';
+  const horas = [...new Set(r.hora_dia.map(x => x.hora))].sort((a, b) => a - b); const dias = [1,2,3,4,5,6,0];
+  const max = Math.max(...r.hora_dia.map(x => x.ventas), 1); const val = (d, h) => r.hora_dia.find(x => x.dia === d && x.hora === h)?.ventas || 0;
+  const pd = dias.map(d => r.por_dia_semana.find(x => x.dia === d) || {dia: d, ventas: 0, dias: 0});
+  return `<div class="two"><div><h3 style="margin-top:0">Promedio por día de la semana</h3>${barras(pd, x => DSEM[x.dia], x => x.dias ? r2(x.ventas / x.dias) : 0)}</div>
+    <div><h3 style="margin-top:0">Ventas por hora</h3>${barras(r.por_hora, x => `${x.hora}:00 – ${x.hora + 1}:00`, x => x.ventas)}</div></div>
+    <h3>Mapa de calor: día × hora</h3><div class="tbl"><table><thead><tr><th></th>${horas.map(h => `<th class="n">${h}h</th>`).join('')}</tr></thead><tbody>
+    ${dias.map(d => `<tr><td><b>${DSEM[d]}</b></td>${horas.map(h => { const v = val(d, h); return `<td class="n" style="background:${v ? `color-mix(in srgb, var(--accent) ${Math.round(10 + 70 * v / max)}%, transparent)` : 'transparent'};color:${v / max > .55 ? '#fff' : 'inherit'}">${v ? money(v) : ''}</td>`; }).join('')}</tr>`).join('')}</tbody></table></div>
+    <p class="note">Úsalo para decidir horarios del personal y cuándo publicar anuncios: justo antes de tus horas más fuertes.</p>`;
 }
 async function aProductos(){
   const r = await reporte();
@@ -788,14 +885,55 @@ async function aAjustes(){
       <button class="btn pri" id="sv2">Guardar</button></div>
     <div class="card grid"><h2>Notas rápidas</h2><p class="muted">Una por renglón. Aparecen como botones al agregar un platillo.</p>
       <textarea id="cn" rows="7" style="font:16px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg)">${esc((c.notas_rapidas || []).join('\n'))}</textarea>
-      <button class="btn pri" id="sv3">Guardar</button></div></div>`;
+      <button class="btn pri" id="sv3">Guardar</button></div>
+    <div class="card grid"><h2>Cobro y ticket</h2>
+      <label class="row"><input type="checkbox" id="cprop" ${c.propinas_activas !== false ? 'checked' : ''} style="width:22px;height:22px"> Registrar propinas al cobrar</label>
+      <label class="row"><input type="checkbox" id="civa" ${c.iva_incluido !== false ? 'checked' : ''} style="width:22px;height:22px"> Los precios incluyen IVA (para calcular la ganancia)</label>
+      <label class="field">Encabezado del ticket<textarea id="cte" rows="3" style="font:16px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg)">${esc(c.ticket_encabezado || '')}</textarea></label>
+      <label class="field">Pie del ticket<textarea id="ctp" rows="2" style="font:16px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg)">${esc(c.ticket_pie || '')}</textarea></label>
+      <button class="btn pri" id="sv4">Guardar</button></div>
+    <div class="card grid"><h2>Respaldo</h2><p class="muted" style="margin:0">Descarga toda la información (ventas, cortes, inventario, recetas, personal sin PIN) en un archivo. Hazlo cada semana y guárdalo en tu computadora o en la nube.</p>
+      <p style="margin:0">Último respaldo: <b>${c.ultimo_respaldo ? ftime(c.ultimo_respaldo) : 'nunca'}</b></p>
+      <button class="btn pri" id="bresp">Descargar respaldo</button></div></div>`;
   const g = (k, v) => call('admin_config_guardar', {p_clave: k, p_valor: v});
   const ok = async f => { try { await f(); toast('Guardado'); } catch(e){ toast(e.message, true); } };
   $('#sv1').onclick = () => ok(async () => { await g('mesas', Number($('#cm').value)); await g('fondo_caja', Number($('#cf').value)); await g('inactividad_min', Number($('#ci').value)); await g('max_intentos', Number($('#cx').value)); await g('bloqueo_min', Number($('#cb').value)); S.ses.config.mesas = Number($('#cm').value); S.ses.config.inactividad_min = Number($('#ci').value); });
   $('#sv2').onclick = () => ok(async () => { await g('ajuste_plataforma', {rappi: Number($('#pa_rappi').value) || 0, didi: Number($('#pa_didi').value) || 0, uber: Number($('#pa_uber').value) || 0}); await g('ajuste_plataforma_confirmado', $('#pac').checked); await cargaMenu(); });
   $('#sv3').onclick = () => ok(async () => { const n = $('#cn').value.split('\n').map(x => x.trim()).filter(Boolean).slice(0, 16); await g('notas_rapidas', n); S.ses.config.notas_rapidas = n; });
+  $('#sv4').onclick = () => ok(async () => { await g('propinas_activas', $('#cprop').checked); await g('iva_incluido', $('#civa').checked); await g('ticket_encabezado', $('#cte').value.trim()); await g('ticket_pie', $('#ctp').value.trim());
+    Object.assign(S.ses.config, {propinas_activas: $('#cprop').checked, ticket_encabezado: $('#cte').value.trim(), ticket_pie: $('#ctp').value.trim()}); });
+  $('#bresp').onclick = respaldo;
+}
+async function respaldo(){
+  try { const r = await call('admin_respaldo'); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(r)], {type: 'application/json'}));
+    a.download = `respaldo_ahogaditas_${hoyISO()}.json`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    toast(`Respaldo descargado: ${r.ordenes.length} órdenes, ${r.movimientos.length} movimientos`); if (S.admin.tab === 'ajustes') aAjustes(); }
+  catch(e){ toast(e.message, true); }
 }
 
+
+/* ---------- costos y ganancia ---------- */
+let costoVista = 'vendido';
+async function aCostos(){
+  const A = S.admin; const d = await call('admin_costeo', {p_desde: A.desde, p_hasta: A.hasta, p_demo: A.demo});
+  const v = d.vendido; const tot = v.reduce((a, x) => ({ventas: a.ventas + x.ventas, costo: a.costo + x.costo}), {ventas: 0, costo: 0});
+  const inc = d.menu.filter(x => x.faltan > 0).length;
+  const pct = x => x == null ? '—' : (Math.round(x * 1000) / 10) + ' %';
+  const mg = (x, row) => row && row.faltan ? '<span class="muted">incompleto</span>' : x == null ? '—' : `<b class="${x < 0.5 ? 'neg' : x >= 0.65 ? 'pos' : ''}">${pct(x)}</b>`;
+  const datos = x => x.faltan ? `<span class="tag pend">faltan ${x.faltan} dato(s)</span>` : '<span class="tag t-mesa">completo</span>';
+  $('#abody').innerHTML = `${inc ? `<div class="banner">El costo de <b>${inc} de ${d.menu.length}</b> platillos está incompleto: falta medir ingredientes en <b>Recetas</b> o capturar el costo de insumos (con cada <b>Compra</b> se guarda solo). Mientras tanto, el costo que ves es solo de lo que ya tiene dato.</div>` : ''}
+    <div class="grid kpis">
+      <div class="kpi"><div class="l">Ventas sin IVA</div><div class="v num">${money(tot.ventas)}</div></div>
+      <div class="kpi"><div class="l">Costo de ingredientes</div><div class="v num">${money(tot.costo)}</div></div>
+      <div class="kpi"><div class="l">Ganancia bruta</div><div class="v num">${money(tot.ventas - tot.costo)}</div></div>
+      <div class="kpi"><div class="l">Costo de alimentos</div><div class="v num">${tot.ventas && !v.some(x => x.faltan) ? pct(tot.costo / tot.ventas) : '—'}</div>${v.some(x => x.faltan) ? '<div class="small muted">incompleto: faltan datos</div>' : ''}</div></div>
+    <div class="row" style="margin-bottom:10px"><button class="chip" data-cv="vendido" aria-pressed="${costoVista === 'vendido'}">Lo vendido en el periodo</button><button class="chip" data-cv="menu" aria-pressed="${costoVista === 'menu'}">Costo por platillo del menú</button></div>
+    ${costoVista === 'vendido'
+      ? tabla([['Producto', x => esc(x.producto)], ['Unidades', x => x.unidades, 'n'], ['Ventas sin IVA', x => money(x.ventas), 'n'], ['Costo', x => money(x.costo), 'n'], ['Ganancia', x => money(x.ganancia), 'n'], ['Margen', x => mg(x.margen, x), 'n'], ['Datos', datos]], v, 'Sin ventas en este periodo.')
+      : tabla([['Platillo', x => `<b>${esc(x.producto)}</b>${x.variante ? `<br><span class="muted small">${esc(x.variante)}</span>` : ''}`], ['Código', x => `<code>${esc(x.codigo)}</code>`], ['Precio', x => money(x.precio), 'n'], ['Costo', x => money(x.costo), 'n'], ['Ganancia por pieza', x => money(r2(x.precio / d.iva - x.costo)), 'n'], ['Margen', x => mg(x.margen, x), 'n'], ['Datos', datos]], d.menu)}
+    <p class="note">Margen = (precio sin IVA − costo de ingredientes) ÷ precio sin IVA. Referencia en restaurantes: costo de alimentos entre 28 y 35 % (margen de 65–72 %). En verde: margen de 65 % o más; en rojo: menos de 50 %. No incluye renta, sueldos ni comisiones de las apps. El costo usa el último precio de compra de cada insumo.</p>`;
+  app().querySelectorAll('[data-cv]').forEach(b => b.onclick = () => { costoVista = b.dataset.cv; aCostos(); });
+}
 
 /* ---------- inventario ---------- */
 const fq = (q, u) => { if (q == null) return '—'; const n = Number(q);
@@ -803,7 +941,7 @@ const fq = (q, u) => { if (q == null) return '—'; const n = Number(q);
   if (u === 'ml' && Math.abs(n) >= 1000) return (Math.round(n / 10) / 100).toLocaleString('es-MX') + ' L';
   return (Math.round(n * 100) / 100).toLocaleString('es-MX') + ' ' + u; };
 const PILL = {'Agotado':'crit','Bajo mínimo':'crit','Pedir ya':'warn','Sin conteo':'mute','OK':'ok'};
-const pill = e => `<span class="tag ${PILL[e] === 'crit' ? 'app' : PILL[e] === 'warn' ? 'pend' : PILL[e] === 'ok' ? 'mesa' : ''}">${esc(e)}</span>`;
+const pill = e => `<span class="tag ${PILL[e] === 'crit' ? 't-app' : PILL[e] === 'warn' ? 'pend' : PILL[e] === 'ok' ? 't-mesa' : ''}">${esc(e)}</span>`;
 const TIPOMOV = {inicial:'Conteo inicial', conteo:'Ajuste por conteo', compra:'Compra', produccion:'Producción', consumo_produccion:'Usado en producción', venta:'Venta', anulacion:'Venta anulada',
   merma:'Merma', consumo_personal:'Consumo personal', cortesia:'Cortesía', correccion:'Corrección'};
 let invSub = 'existencias', invFiltro = 'todos', invCiego = true;
@@ -812,7 +950,7 @@ async function aInventario(){
   const ins = d.insumos; const cats = [...new Set(ins.map(i => i.categoria))];
   const alertas = ins.filter(i => ['Agotado','Bajo mínimo','Pedir ya'].includes(i.estado)).length;
   const vence = d.lotes.filter(l => l.dias <= 2);
-  const subs = [['existencias','Existencias'],['capturar','Registrar movimiento'],['conteo','Conteo físico']];
+  const subs = [['existencias','Existencias'],['compras','Qué comprar'],['capturar','Registrar movimiento'],['conteo','Conteo físico'],['proveedores','Proveedores']];
   $('#abody').innerHTML = `${A.demo ? '<div class="banner">Incluye movimientos DEMO.</div>' : ''}
     ${d.lineas_por_medir ? `<div class="banner">El descuento automático usa solo ingredientes con cantidad: faltan <b>${d.lineas_por_medir} de ${d.lineas_total}</b> por medir. Captúralas en la pestaña <b>Recetas</b>; mientras tanto el conteo semanal corrige la diferencia.</div>` : ''}
     <div class="grid kpis">
@@ -824,7 +962,45 @@ async function aInventario(){
     <div id="ibody"></div>`;
   app().querySelectorAll('[data-isub]').forEach(b => b.onclick = () => { invSub = b.dataset.isub; aInventario(); });
   $('#insNew').onclick = () => formInsumo(null);
-  ({existencias: invExistencias, capturar: invCapturar, conteo: invConteo})[invSub](d, cats);
+  ({existencias: invExistencias, capturar: invCapturar, conteo: invConteo, compras: invCompras, proveedores: invProveedores})[invSub](d, cats);
+}
+async function invCompras(){
+  const r = await call('admin_compras', {p_demo: S.admin.demo});
+  const msg = p => `Buen día${p.contacto ? ' ' + p.contacto : ''}, le hago el pedido de Ahogaditas Tapatío:\n` + p.items.map(i => `- ${i.presentaciones ? `${i.presentaciones} ${i.presentacion || 'pza'}` : fq(i.cantidad, i.unidad)} de ${i.nombre}`).join('\n') + '\n¿Me confirma para cuándo llega? Gracias.';
+  $('#ibody').innerHTML = `<p class="muted" style="margin-top:0">Hoy es ${esc(r.hoy)}. Sugerido = stock objetivo − existencia; si no hay objetivo, consumo diario × (días de entrega + 3) + mínimo − existencia.${r.sin_dato ? ` <b>${r.sin_dato} insumo(s)</b> no tienen mínimo, objetivo ni consumo: captúralos en Existencias → Editar para que aparezcan aquí.` : ''}</p>
+    ${r.proveedores.length ? `<div class="two">${r.proveedores.map((p, ix) => `<div class="card grid"><div class="row"><b style="font-size:18px">${esc(p.proveedor)}</b><span class="spacer"></span>${p.hoy_toca ? '<span class="tag pend">Hoy toca pedir</span>' : p.dias_pedido ? `<span class="tag">Pide: ${esc(p.dias_pedido)}</span>` : ''}</div>
+      ${tabla([['Insumo', i => esc(i.nombre)], ['Hay', i => fq(i.existencia, i.unidad), 'n'], ['Pedir', i => `<b>${i.presentaciones ? `${i.presentaciones} ${esc(i.presentacion || '')}` : fq(i.cantidad, i.unidad)}</b>`, 'n'], ['Aprox.', i => i.costo ? money(i.costo) : '—', 'n']], p.items)}
+      <pre class="ticketprev" id="pm${ix}">${esc(msg(p))}</pre>
+      <div class="row"><button class="btn sm" data-cp="${ix}">Copiar mensaje</button>${p.telefono ? `<a class="btn sm pri" target="_blank" rel="noopener" href="https://wa.me/${esc(p.telefono.replace(/^\+/, '').replace(/^(?!52)/, '52'))}?text=${encodeURIComponent(msg(p))}">Enviar por WhatsApp</a>` : '<span class="muted small">Captura su teléfono en Proveedores para enviarlo por WhatsApp.</span>'}
+        <span class="spacer"></span><b>${p.monto ? money(p.monto) + ' aprox.' : ''}</b></div></div>`).join('')}</div>` : '<div class="empty">Nada por comprar según existencias y mínimos.</div>'}`;
+  app().querySelectorAll('[data-cp]').forEach(b => b.onclick = async () => { try { await navigator.clipboard.writeText($('#pm' + b.dataset.cp).textContent); toast('Mensaje copiado'); } catch(e){ toast('Selecciona el texto y cópialo', true); } });
+}
+const DIASP = ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'];
+async function invProveedores(){
+  const ps = await call('admin_proveedores');
+  $('#ibody').innerHTML = `<div class="row" style="margin-bottom:10px"><button class="btn pri" id="pvNew">+ Proveedor</button></div>
+    ${tabla([['Proveedor', p => `<b>${esc(p.nombre)}</b>${p.activo ? '' : ' <span class="tag">inactivo</span>'}`], ['Contacto', p => esc(p.contacto || '')], ['Teléfono', p => esc(p.telefono || '')], ['Días de pedido', p => esc((p.dias_pedido || []).join(', '))],
+      ['Entrega', p => p.dias_entrega != null ? p.dias_entrega + ' día(s)' : '—', 'n'], ['Insumos', p => p.insumos, 'n'], ['', p => `<button class="btn sm" data-pv="${esc(p.id)}">Editar</button>`]], ps, 'Agrega a tus proveedores: pan birote, carnitas, refrescos, verduras, tortillas…')}
+    <p class="note">Para asignar un proveedor a un insumo: Existencias → Editar → Proveedor (mismo nombre).</p>`;
+  $('#pvNew').onclick = () => formProveedor(null);
+  app().querySelectorAll('[data-pv]').forEach(b => b.onclick = () => formProveedor(ps.find(p => p.id === b.dataset.pv)));
+}
+function formProveedor(p){
+  abreModal(`<div class="sheet"><h2>${p ? 'Editar' : 'Nuevo'} proveedor</h2>
+    <label class="field">Nombre<input id="pv_n" value="${esc(p?.nombre || '')}"></label>
+    <div class="grid" style="grid-template-columns:1fr 1fr;gap:10px"><label class="field">Contacto<input id="pv_c" value="${esc(p?.contacto || '')}"></label><label class="field">Teléfono / WhatsApp (10 dígitos)<input id="pv_t" inputmode="tel" value="${esc(p?.telefono || '')}"></label>
+      <label class="field">Días que tarda en entregar<input id="pv_e" inputmode="numeric" value="${esc(p?.dias_entrega ?? '')}"></label><label class="field">Forma de pago<input id="pv_p" value="${esc(p?.pago || '')}"></label></div>
+    <div class="field">Días en que se le pide<div class="chips">${DIASP.map(d => `<button class="chip" data-dp="${d}" aria-pressed="${(p?.dias_pedido || []).includes(d)}">${d}</button>`).join('')}</div></div>
+    <label class="field">Notas<input id="pv_x" value="${esc(p?.notas || '')}"></label>
+    ${p ? `<label class="row"><input type="checkbox" id="pv_a" ${p.activo ? 'checked' : ''} style="width:22px;height:22px"> Activo</label>` : ''}
+    <div class="foot"><button class="btn big" data-x="no">Cancelar</button><button class="btn pri big" data-x="si">Guardar</button></div></div>`);
+  dlg().querySelectorAll('[data-dp]').forEach(b => b.onclick = () => b.setAttribute('aria-pressed', b.getAttribute('aria-pressed') !== 'true'));
+  dlg().querySelector('[data-x="no"]').onclick = cierraModal;
+  dlg().querySelector('[data-x="si"]').onclick = async () => {
+    const body = {id: p?.id || null, nombre: $('#pv_n').value, contacto: $('#pv_c').value, telefono: $('#pv_t').value, dias_entrega: $('#pv_e').value, pago: $('#pv_p').value, notas: $('#pv_x').value,
+      activo: $('#pv_a') ? $('#pv_a').checked : true, dias_pedido: [...dlg().querySelectorAll('[data-dp][aria-pressed="true"]')].map(b => b.dataset.dp)};
+    try { await call('admin_proveedor_guardar', {p: body}); cierraModal(); toast('Guardado'); invProveedores(); } catch(e){ toast(e.message, true); }
+  };
 }
 function invExistencias(d, cats){
   let ins = d.insumos;
@@ -919,12 +1095,13 @@ function formInsumo(i){
       ${f('categoria', 'Categoría')}<label class="field">Unidad base<select id="fi_unidad">${['g','ml','pz'].map(u => `<option ${i?.unidad === u ? 'selected' : ''}>${u}</option>`).join('')}</select></label>
       ${f('presentacion', 'Presentación de compra (caja, bolsa…)')}${f('contenido', 'Contenido por presentación (u. base)', 'inputmode="decimal"')}
       ${f('minimo', 'Stock mínimo (u. base)', 'inputmode="decimal"')}${f('objetivo', 'Stock objetivo (u. base)', 'inputmode="decimal"')}
-      ${f('costo_unit', 'Costo por unidad base ($)', 'inputmode="decimal"')}${f('proveedor', 'Proveedor')}
+      ${f('costo_unit', 'Costo por unidad base ($)', 'inputmode="decimal"')}${f('proveedor', 'Proveedor', 'list="provlist"')}<datalist id="provlist"></datalist>
       ${f('vida_util_dias', 'Vida útil (días)', 'inputmode="numeric"')}${f('ubicacion', 'Ubicación')}</div>
     ${f('notas', 'Notas')}
     <label class="row"><input type="checkbox" id="fi_activo" ${!i || i.activo !== false ? 'checked' : ''} style="width:22px;height:22px"> Activo</label>
     <div class="foot"><button class="btn big" data-x="no">Cancelar</button><button class="btn pri big" data-x="si">Guardar</button></div></div>`);
   dlg().querySelector('[data-x="no"]').onclick = cierraModal;
+  call('admin_proveedores').then(ps => { const dl = $('#provlist'); if (dl) dl.innerHTML = ps.map(p => `<option value="${esc(p.nombre)}">`).join(''); }).catch(() => {});
   dlg().querySelector('[data-x="si"]').onclick = async () => {
     const g = k => $('#fi_' + k).value.trim();
     const p = {codigo: i?.codigo || g('codigo'), nombre: g('nombre'), categoria: g('categoria'), unidad: g('unidad'), presentacion: g('presentacion'), contenido: g('contenido'), minimo: g('minimo'),
@@ -970,6 +1147,8 @@ document.addEventListener('click', async e => {
   if (a === 'cobrar') return cobrar();
   if (a === 'desc') return descuento();
   if (a === 'cancelOrden') return cancelarOrden();
+  if (a === 'cuenta') return preCuenta();
+  if (a === 'mover') return moverMesa();
   if (a === 'corte'){ S.vista = 'corte'; return render(); }
   if (a === 'admin'){ S.vista = 'admin'; return render(); }
   if (a === 'verErrores'){
