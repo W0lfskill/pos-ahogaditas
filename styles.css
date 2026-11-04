@@ -163,7 +163,7 @@ th{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute
 tr:last-child td{border-bottom:0}
 td.n,th.n{text-align:right}
 td.w{white-space:normal;min-width:200px}
-.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;align-items:start}
 .cell{width:96px;font:16px var(--body);padding:8px;border:1.5px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);text-align:right}
 .cell.w{width:140px;text-align:left}
 .neg{color:var(--crit)} .pos{color:var(--ok)}

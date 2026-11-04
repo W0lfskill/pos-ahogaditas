@@ -157,7 +157,7 @@ function bloquear(){
     <button class="btn ghost block" id="lswitch" style="margin-top:12px">Cambiar de usuario</button></div>`;
   document.body.appendChild(el);
   // Datos de administración fuera de la memoria mientras está bloqueado
-  S.admin.rep = S.admin.bit = S.admin.per = S.admin.prods = S.admin.cfg = null;
+  S.admin.rep = S.admin.bit = S.admin.per = S.admin.prods = S.admin.cfg = S.admin.inv = null;
   if (S.vista === 'admin' || S.vista === 'corte') S.vista = 'inicio';
   padPin($('#lpad'), $('#ldots'), async pin => {
     if (S.online){
@@ -647,7 +647,7 @@ function rango(k){
 async function vAdmin(){
   const A = S.admin; if (!A.desde) [A.desde, A.hasta] = rango('semana');
   if (rol() !== 'admin'){ S.vista = 'inicio'; return render(); }
-  const tabs = [['resumen','Ventas'],['productos','Por producto'],['cortes','Cortes'],['bitacora','Bitácora'],['personal','Personal'],['menu','Menú y precios'],['ajustes','Ajustes']];
+  const tabs = [['resumen','Ventas'],['productos','Por producto'],['inventario','Inventario'],['recetas','Recetas'],['cortes','Cortes'],['bitacora','Bitácora'],['personal','Personal'],['menu','Menú y precios'],['ajustes','Ajustes']];
   app().innerHTML = barra() + `<main><div class="row" style="margin-bottom:6px"><button class="btn" data-act="inicio">← POS</button><h1 style="margin:0">Panel de ventas</h1></div>
     <nav class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" aria-current="${A.tab === k}">${l}</button>`).join('')}</nav>
     ${['resumen','productos','cortes','bitacora'].includes(A.tab) ? `<div class="row" style="margin-bottom:12px">
@@ -661,7 +661,7 @@ async function vAdmin(){
   if (dd) dd.onchange = () => { A.desde = dd.value; if (A.hasta < A.desde) A.hasta = A.desde; A.rep = A.bit = null; vAdmin(); };
   if (dh) dh.onchange = () => { A.hasta = dh.value; if (A.hasta < A.desde) A.desde = A.hasta; A.rep = A.bit = null; vAdmin(); };
   if (vd) vd.onchange = () => { A.demo = vd.checked; A.rep = A.bit = null; vAdmin(); };
-  try { await ({resumen: aResumen, productos: aProductos, cortes: aCortes, bitacora: aBitacora, personal: aPersonal, menu: aMenu, ajustes: aAjustes}[A.tab])(); }
+  try { await ({resumen: aResumen, productos: aProductos, inventario: aInventario, recetas: aRecetas, cortes: aCortes, bitacora: aBitacora, personal: aPersonal, menu: aMenu, ajustes: aAjustes}[A.tab])(); }
   catch(e){ $('#abody').innerHTML = `<div class="banner crit">${esc(e.message)}</div>`; }
 }
 async function reporte(){ const A = S.admin; if (!A.rep) A.rep = await call('admin_reporte', {p_desde: A.desde, p_hasta: A.hasta, p_demo: A.demo}); return A.rep; }
@@ -794,6 +794,167 @@ async function aAjustes(){
   $('#sv1').onclick = () => ok(async () => { await g('mesas', Number($('#cm').value)); await g('fondo_caja', Number($('#cf').value)); await g('inactividad_min', Number($('#ci').value)); await g('max_intentos', Number($('#cx').value)); await g('bloqueo_min', Number($('#cb').value)); S.ses.config.mesas = Number($('#cm').value); S.ses.config.inactividad_min = Number($('#ci').value); });
   $('#sv2').onclick = () => ok(async () => { await g('ajuste_plataforma', {rappi: Number($('#pa_rappi').value) || 0, didi: Number($('#pa_didi').value) || 0, uber: Number($('#pa_uber').value) || 0}); await g('ajuste_plataforma_confirmado', $('#pac').checked); await cargaMenu(); });
   $('#sv3').onclick = () => ok(async () => { const n = $('#cn').value.split('\n').map(x => x.trim()).filter(Boolean).slice(0, 16); await g('notas_rapidas', n); S.ses.config.notas_rapidas = n; });
+}
+
+
+/* ---------- inventario ---------- */
+const fq = (q, u) => { if (q == null) return '—'; const n = Number(q);
+  if (u === 'g' && Math.abs(n) >= 1000) return (Math.round(n / 10) / 100).toLocaleString('es-MX') + ' kg';
+  if (u === 'ml' && Math.abs(n) >= 1000) return (Math.round(n / 10) / 100).toLocaleString('es-MX') + ' L';
+  return (Math.round(n * 100) / 100).toLocaleString('es-MX') + ' ' + u; };
+const PILL = {'Agotado':'crit','Bajo mínimo':'crit','Pedir ya':'warn','Sin conteo':'mute','OK':'ok'};
+const pill = e => `<span class="tag ${PILL[e] === 'crit' ? 'app' : PILL[e] === 'warn' ? 'pend' : PILL[e] === 'ok' ? 'mesa' : ''}">${esc(e)}</span>`;
+const TIPOMOV = {inicial:'Conteo inicial', conteo:'Ajuste por conteo', compra:'Compra', produccion:'Producción', consumo_produccion:'Usado en producción', venta:'Venta', anulacion:'Venta anulada',
+  merma:'Merma', consumo_personal:'Consumo personal', cortesia:'Cortesía', correccion:'Corrección'};
+let invSub = 'existencias', invFiltro = 'todos', invCiego = true;
+async function aInventario(){
+  const A = S.admin; const d = await call('admin_inventario', {p_demo: A.demo}); A.inv = d;
+  const ins = d.insumos; const cats = [...new Set(ins.map(i => i.categoria))];
+  const alertas = ins.filter(i => ['Agotado','Bajo mínimo','Pedir ya'].includes(i.estado)).length;
+  const vence = d.lotes.filter(l => l.dias <= 2);
+  const subs = [['existencias','Existencias'],['capturar','Registrar movimiento'],['conteo','Conteo físico']];
+  $('#abody').innerHTML = `${A.demo ? '<div class="banner">Incluye movimientos DEMO.</div>' : ''}
+    ${d.lineas_por_medir ? `<div class="banner">El descuento automático usa solo ingredientes con cantidad: faltan <b>${d.lineas_por_medir} de ${d.lineas_total}</b> por medir. Captúralas en la pestaña <b>Recetas</b>; mientras tanto el conteo semanal corrige la diferencia.</div>` : ''}
+    <div class="grid kpis">
+      <div class="kpi"><div class="l">Valor del inventario</div><div class="v num">${money(ins.reduce((a, i) => a + (i.valor > 0 ? i.valor : 0), 0))}</div></div>
+      <div class="kpi"><div class="l">Por pedir o agotados</div><div class="v num ${alertas ? 'neg' : ''}">${alertas}</div></div>
+      <div class="kpi"><div class="l">Sin conteo</div><div class="v num">${ins.filter(i => i.estado === 'Sin conteo').length}</div></div>
+      <div class="kpi"><div class="l">Lotes por vencer (≤ 2 días)</div><div class="v num ${vence.length ? 'neg' : ''}">${vence.length}</div></div></div>
+    <div class="row" style="margin-bottom:12px">${subs.map(([k, l]) => `<button class="chip" data-isub="${k}" aria-pressed="${invSub === k}">${l}</button>`).join('')}<span class="spacer"></span><button class="btn sm" id="insNew">+ Insumo</button></div>
+    <div id="ibody"></div>`;
+  app().querySelectorAll('[data-isub]').forEach(b => b.onclick = () => { invSub = b.dataset.isub; aInventario(); });
+  $('#insNew').onclick = () => formInsumo(null);
+  ({existencias: invExistencias, capturar: invCapturar, conteo: invConteo})[invSub](d, cats);
+}
+function invExistencias(d, cats){
+  let ins = d.insumos;
+  if (invFiltro === 'alerta') ins = ins.filter(i => ['Agotado','Bajo mínimo','Pedir ya'].includes(i.estado));
+  else if (invFiltro !== 'todos') ins = ins.filter(i => i.categoria === invFiltro);
+  $('#ibody').innerHTML = `${d.lotes.length ? `<h3>Lotes con caducidad</h3>${tabla([['Insumo', l => esc(l.nombre)], ['Cantidad', l => fq(l.cantidad, l.unidad), 'n'], ['Caduca', l => fdate(l.caduca)], ['Días', l => `<b class="${l.dias < 0 ? 'neg' : l.dias <= 2 ? 'neg' : ''}">${l.dias < 0 ? 'Vencido' : l.dias}</b>`, 'n'],
+      ['', l => `<button class="btn sm" data-lote="${esc(l.id)}" data-st="Agotado">Se usó</button> <button class="btn sm" data-lote="${esc(l.id)}" data-st="Merma">Merma</button>`]], d.lotes)}` : ''}
+    <h3>Existencias</h3><div class="row" style="margin-bottom:10px">${[['todos','Todos'],['alerta','Por pedir'],...cats.map(c => [c, c])].map(([k, l]) => `<button class="chip" data-if="${esc(k)}" aria-pressed="${invFiltro === k}">${esc(l)}</button>`).join('')}</div>
+    ${tabla([['Insumo', i => `<b>${esc(i.nombre)}</b><br><span class="muted small">${esc(i.codigo)}</span>`], ['Estado', i => pill(i.estado)], ['Existencia', i => `<b>${fq(i.existencia, i.unidad)}</b>`, 'n'],
+      ['Mín. / objetivo', i => `${i.minimo != null ? fq(i.minimo, i.unidad) : '—'} / ${i.objetivo != null ? fq(i.objetivo, i.unidad) : '—'}`, 'n'], ['Consumo/día', i => i.consumo_dia ? fq(i.consumo_dia, i.unidad) : '—', 'n'],
+      ['Alcanza', i => i.cobertura != null ? i.cobertura + ' días' : '—', 'n'], ['Pedir', i => i.sugerido ? fq(i.sugerido, i.unidad) : '—', 'n'], ['Último conteo', i => i.ultimo_conteo ? fdate(i.ultimo_conteo) : '—'],
+      ['Costo', i => i.costo_unit != null ? money(i.costo_unit) + '/' + i.unidad : '—', 'n'], ['Valor', i => i.valor ? money(i.valor) : '—', 'n'],
+      ['', i => `<button class="btn sm" data-kx="${esc(i.codigo)}">Historial</button> <button class="btn sm" data-ied="${esc(i.codigo)}">Editar</button>`]], ins, 'Ningún insumo con este filtro.')}
+    <p class="note">Consumo/día = promedio de los últimos 7 días (ventas y producción). “Alcanza” = existencia ÷ consumo. “Pedir ya” cuando alcanza para 2 días o menos. Captura mínimo y objetivo en Editar para que el sistema sugiera cuánto pedir.</p>`;
+  app().querySelectorAll('[data-if]').forEach(b => b.onclick = () => { invFiltro = b.dataset.if; invExistencias(d, cats); });
+  app().querySelectorAll('[data-kx]').forEach(b => b.onclick = () => kardex(d.insumos.find(i => i.codigo === b.dataset.kx)));
+  app().querySelectorAll('[data-ied]').forEach(b => b.onclick = () => formInsumo(d.insumos.find(i => i.codigo === b.dataset.ied)));
+  app().querySelectorAll('[data-lote]').forEach(b => b.onclick = async () => { try { await call('admin_lote_estado', {p_lote: b.dataset.lote, p_estado: b.dataset.st}); toast('Listo'); aInventario(); } catch(e){ toast(e.message, true); } });
+}
+const opcionesInsumo = (ins, sel) => ins.map(i => `<option value="${esc(i.codigo)}" ${i.codigo === sel ? 'selected' : ''}>${esc(i.nombre)} (${esc(i.unidad)})</option>`).join('');
+let movTipo = 'compra';
+function invCapturar(d){
+  const T = [['compra','Compra / recepción'],['produccion','Producción'],['merma','Merma'],['consumo_personal','Consumo del personal'],['cortesia','Cortesía'],['correccion','Corrección (+/−)']];
+  const ins = movTipo === 'produccion' ? d.insumos.filter(i => i.codigo.startsWith('PRE-')) : d.insumos;
+  $('#ibody').innerHTML = `<div class="card grid" style="max-width:640px">
+    <div class="chips">${T.map(([k, l]) => `<button class="chip" data-mt="${k}" aria-pressed="${movTipo === k}">${l}</button>`).join('')}</div>
+    <label class="field">${movTipo === 'produccion' ? 'Preparación' : 'Insumo'}<select id="mi">${opcionesInsumo(ins)}</select></label>
+    <div id="mextra"></div>
+    <label class="field">Nota ${['merma','correccion'].includes(movTipo) ? '(obligatoria)' : '(opcional)'}<input id="mn" maxlength="150"></label>
+    <button class="btn pri big" id="msv">Guardar</button>
+    <p class="note" id="mhelp"></p></div>`;
+  app().querySelectorAll('[data-mt]').forEach(b => b.onclick = () => { movTipo = b.dataset.mt; invCapturar(d); });
+  const extra = () => {
+    const i = d.insumos.find(x => x.codigo === $('#mi').value); if (!i) return;
+    const u = i.unidad;
+    if (movTipo === 'compra') $('#mextra').innerHTML = `<div class="grid" style="grid-template-columns:1fr 1fr;gap:10px">
+        <label class="field">Cantidad en ${u}<input id="mq" class="cell" style="width:100%" inputmode="decimal"></label>
+        <label class="field">o en ${esc(i.presentacion || 'presentaciones')}${i.contenido ? ` (${fq(i.contenido, u)} c/u)` : ' (falta contenido)'}<input id="mp" class="cell" style="width:100%" inputmode="decimal" ${i.contenido ? '' : 'disabled'}></label>
+        <label class="field">Costo total ($)<input id="mc" class="cell" style="width:100%" inputmode="decimal"></label>
+        <label class="field">Proveedor<input id="mpv" class="cell w" style="width:100%" value="${esc(i.proveedor || '')}"></label>
+        <label class="field">Caduca (opcional)<input id="mcad" type="date" class="cell w" style="width:100%"></label></div>`;
+    else $('#mextra').innerHTML = `<label class="field">Cantidad en ${u}${movTipo === 'correccion' ? ' (negativo para restar)' : ''}<input id="mq" class="cell" style="width:100%" inputmode="decimal"></label>`;
+    $('#mhelp').textContent = movTipo === 'produccion' ? 'Suma la preparación y descuenta sus ingredientes según el rendimiento capturado en Recetas.' : movTipo === 'compra' ? 'Suma al inventario y actualiza el costo (costo total ÷ cantidad).' : 'Resta del inventario.';
+  };
+  $('#mi').onchange = extra; extra();
+  $('#msv').onclick = async () => {
+    const v = id => $(id) ? $(id).value.trim() : '';
+    try {
+      if (movTipo === 'produccion'){
+        const r = await call('admin_produccion', {p_insumo: v('#mi'), p_cantidad: Number(v('#mq')), p_nota: v('#mn') || null});
+        toast(r.sin_rendimiento ? 'Producción registrada. Falta el rendimiento en Recetas: no se descontaron ingredientes.' : `Producción registrada · ${r.ingredientes_descontados} ingrediente(s) descontados${r.ingredientes_por_medir ? `, ${r.ingredientes_por_medir} por medir` : ''}`, r.sin_rendimiento);
+      } else {
+        const r = await call('admin_inv_registrar', {p: {tipo: movTipo, insumo: v('#mi'), cantidad: v('#mq'), presentaciones: v('#mp'), costo_total: v('#mc'), proveedor: v('#mpv'), caduca: v('#mcad'), nota: v('#mn')}});
+        toast('Guardado · existencia: ' + fq(r.existencia, d.insumos.find(x => x.codigo === v('#mi')).unidad));
+      }
+      $('#mn').value = ''; if ($('#mq')) $('#mq').value = ''; if ($('#mp')) $('#mp').value = ''; if ($('#mc')) $('#mc').value = '';
+    } catch(e){ toast(e.message, true); }
+  };
+}
+function invConteo(d, cats){
+  $('#ibody').innerHTML = `<div class="banner" style="background:var(--info-bg);color:var(--info)">Cuenta lo que hay físicamente y escríbelo en la unidad indicada. Deja vacío lo que no contaste. Al guardar, la existencia queda igual a lo contado y la diferencia se registra como ajuste.</div>
+    <label class="row small" style="margin-bottom:10px"><input type="checkbox" id="ciego" ${invCiego ? 'checked' : ''} style="width:22px;height:22px"> Conteo a ciegas (no mostrar lo que el sistema espera)</label>
+    ${cats.map(c => `<h3>${esc(c)}</h3>${tabla([['Insumo', i => esc(i.nombre)], ['Unidad', i => i.unidad], ...(invCiego ? [] : [['Esperado', i => fq(i.existencia, i.unidad), 'n']]),
+       ['Contado', i => `<input class="cell" data-cnt="${esc(i.codigo)}" inputmode="decimal">`, 'n']], d.insumos.filter(i => i.categoria === c))}`).join('')}
+    <div class="card row" style="position:sticky;bottom:8px;margin-top:12px"><input id="cnota" class="cell w" style="flex:1" placeholder="Nota (opcional): quién contó, observaciones"><button class="btn pri big" id="csave">Guardar conteo</button></div>`;
+  $('#ciego').onchange = e => { invCiego = e.target.checked; invConteo(d, cats); };
+  $('#csave').onclick = async () => {
+    const items = [...app().querySelectorAll('[data-cnt]')].filter(i => i.value.trim() !== '').map(i => ({insumo: i.dataset.cnt, contado: Number(i.value.replace(',', '.'))}));
+    if (!items.length) return toast('No capturaste ningún conteo.', true);
+    if (items.some(i => !(i.contado >= 0))) return toast('Hay un número no válido.', true);
+    try { const r = await call('admin_conteo', {p_items: items, p_nota: $('#cnota').value.trim() || null});
+      abreModal(`<div class="sheet"><h2>Conteo guardado</h2><p class="muted">${r.resultado.length} insumo(s). Diferencias contra lo que esperaba el sistema:</p>
+        ${tabla([['Insumo', x => esc(x.insumo)], ['Esperado', x => fq(x.esperado, x.unidad), 'n'], ['Contado', x => fq(x.contado, x.unidad), 'n'], ['Diferencia', x => `<b class="${x.diferencia < 0 ? 'neg' : x.diferencia > 0 ? 'pos' : ''}">${fq(x.diferencia, x.unidad)}</b>`, 'n']], r.resultado)}
+        <div class="foot"><button class="btn pri big" data-x="ok">Listo</button></div></div>`);
+      dlg().querySelector('[data-x="ok"]').onclick = () => { cierraModal(); invSub = 'existencias'; aInventario(); };
+    } catch(e){ toast(e.message, true); }
+  };
+}
+async function kardex(i){
+  const k = await call('admin_kardex', {p_insumo: i.codigo, p_demo: S.admin.demo});
+  abreModal(`<div class="sheet"><div class="row"><h2 style="margin:0">${esc(i.nombre)}</h2><span class="spacer"></span><button class="btn sm" data-x="no">Cerrar</button></div>
+    <p class="muted" style="margin:0">Existencia: <b>${fq(i.existencia, i.unidad)}</b> · últimos ${k.length} movimientos</p>
+    ${tabla([['Cuándo', x => ftime(x.cuando)], ['Movimiento', x => esc(TIPOMOV[x.tipo] || x.tipo)], ['Cantidad', x => `<span class="${x.cantidad < 0 ? 'neg' : 'pos'}">${x.cantidad > 0 ? '+' : ''}${fq(x.cantidad, i.unidad)}</span>`, 'n'],
+      ['Saldo', x => fq(x.saldo, i.unidad), 'n'], ['Nota', x => esc(x.nota || '') + (x.quien ? ` <span class="muted">· ${esc(x.quien)}</span>` : ''), 'w']], k, 'Sin movimientos.')}</div>`);
+  dlg().querySelector('[data-x="no"]').onclick = cierraModal;
+}
+function formInsumo(i){
+  const f = (k, l, extra) => `<label class="field">${l}<input id="fi_${k}" value="${esc(i?.[k] ?? '')}" ${extra || ''}></label>`;
+  abreModal(`<div class="sheet"><h2>${i ? 'Editar' : 'Nuevo'} insumo</h2>
+    <div class="grid" style="grid-template-columns:1fr 1fr;gap:10px">
+      ${f('codigo', 'Código (ABC-001)', i ? 'disabled' : '')}${f('nombre', 'Nombre')}
+      ${f('categoria', 'Categoría')}<label class="field">Unidad base<select id="fi_unidad">${['g','ml','pz'].map(u => `<option ${i?.unidad === u ? 'selected' : ''}>${u}</option>`).join('')}</select></label>
+      ${f('presentacion', 'Presentación de compra (caja, bolsa…)')}${f('contenido', 'Contenido por presentación (u. base)', 'inputmode="decimal"')}
+      ${f('minimo', 'Stock mínimo (u. base)', 'inputmode="decimal"')}${f('objetivo', 'Stock objetivo (u. base)', 'inputmode="decimal"')}
+      ${f('costo_unit', 'Costo por unidad base ($)', 'inputmode="decimal"')}${f('proveedor', 'Proveedor')}
+      ${f('vida_util_dias', 'Vida útil (días)', 'inputmode="numeric"')}${f('ubicacion', 'Ubicación')}</div>
+    ${f('notas', 'Notas')}
+    <label class="row"><input type="checkbox" id="fi_activo" ${!i || i.activo !== false ? 'checked' : ''} style="width:22px;height:22px"> Activo</label>
+    <div class="foot"><button class="btn big" data-x="no">Cancelar</button><button class="btn pri big" data-x="si">Guardar</button></div></div>`);
+  dlg().querySelector('[data-x="no"]').onclick = cierraModal;
+  dlg().querySelector('[data-x="si"]').onclick = async () => {
+    const g = k => $('#fi_' + k).value.trim();
+    const p = {codigo: i?.codigo || g('codigo'), nombre: g('nombre'), categoria: g('categoria'), unidad: g('unidad'), presentacion: g('presentacion'), contenido: g('contenido'), minimo: g('minimo'),
+      objetivo: g('objetivo'), costo_unit: g('costo_unit'), proveedor: g('proveedor'), vida_util_dias: g('vida_util_dias'), ubicacion: g('ubicacion'), notas: g('notas'), activo: $('#fi_activo').checked};
+    try { await call('admin_insumo_guardar', {p}); cierraModal(); toast('Guardado'); aInventario(); } catch(e){ toast(e.message, true); }
+  };
+}
+let recFiltro = 'por_medir';
+async function aRecetas(){
+  const d = await call('admin_recetas'); const TIPOS = [...new Set(d.recetas.map(r => r.tipo))];
+  let rs = d.recetas.filter(r => r.lineas.length || r.tipo === 'Preparación');
+  if (recFiltro === 'por_medir') rs = rs.filter(r => r.lineas.some(l => l.cantidad == null) || (r.tipo === 'Preparación' && r.rendimiento == null));
+  else if (recFiltro !== 'todas') rs = rs.filter(r => r.tipo === recFiltro);
+  const faltan = d.recetas.reduce((a, r) => a + r.lineas.filter(l => l.cantidad == null).length, 0);
+  $('#abody').innerHTML = `<p class="muted" style="margin-top:0">Cantidad por porción vendida (o por lote en preparaciones), en la unidad indicada. <b>${faltan}</b> ingrediente(s) por medir. Cada cambio queda en la bitácora y aplica a las ventas desde ese momento.</p>
+    <div class="row" style="margin-bottom:12px">${[['por_medir','Por medir'],['todas','Todas'],...TIPOS.map(t => [t, t])].map(([k, l]) => `<button class="chip" data-rf="${esc(k)}" aria-pressed="${recFiltro === k}">${esc(l)}</button>`).join('')}</div>
+    ${rs.length ? `<div class="two">${rs.map(r => `<div class="card" data-rec="${esc(r.codigo)}"><div class="row"><b>${esc(r.nombre)}</b><span class="spacer"></span><span class="muted small">${esc(r.codigo)} · ${esc(r.tipo)}</span></div>
+      ${r.tipo === 'Preparación' ? `<label class="field" style="margin-top:8px">Rendimiento de un lote (${esc(r.unidad_rend || '')})<input class="cell" data-rend inputmode="decimal" value="${esc(r.rendimiento ?? '')}" placeholder="por medir"></label>` : ''}
+      <table style="margin-top:8px"><tbody>${r.lineas.map(l => `<tr><td class="w">${esc(l.nombre)}${l.nota ? `<br><span class="muted small">${esc(l.nota)}</span>` : ''}</td>
+        <td class="n"><input class="cell" data-lin="${esc(l.insumo)}" inputmode="decimal" value="${esc(l.cantidad ?? '')}" placeholder="por medir" style="${l.cantidad == null ? 'border-color:var(--warn)' : ''}"> ${esc(l.unidad)}</td></tr>`).join('')}</tbody></table>
+      <div class="row" style="margin-top:8px"><select class="cell w" data-addi style="flex:1"><option value="">+ ingrediente…</option>${opcionesInsumo(d.insumos)}</select><button class="btn sm pri" data-rsv="${esc(r.codigo)}">Guardar</button></div></div>`).join('')}</div>` : '<div class="empty">Nada por medir en este filtro.</div>'}`;
+  app().querySelectorAll('[data-rf]').forEach(b => b.onclick = () => { recFiltro = b.dataset.rf; aRecetas(); });
+  app().querySelectorAll('[data-rsv]').forEach(b => b.onclick = async () => {
+    const card = b.closest('[data-rec]'); const p = {receta: b.dataset.rsv, lineas: []};
+    card.querySelectorAll('[data-lin]').forEach(i => p.lineas.push({insumo: i.dataset.lin, cantidad: i.value.trim() === '' ? null : Number(i.value.replace(',', '.'))}));
+    const add = card.querySelector('[data-addi]').value; if (add && !p.lineas.some(l => l.insumo === add)) p.lineas.push({insumo: add, cantidad: null});
+    const rd = card.querySelector('[data-rend]'); if (rd) p.rendimiento = rd.value.trim() === '' ? null : Number(rd.value.replace(',', '.'));
+    if (p.lineas.some(l => l.cantidad != null && !(l.cantidad >= 0))) return toast('Hay una cantidad no válida.', true);
+    try { const r = await call('admin_receta_guardar', {p}); toast(r.cambios ? `Receta guardada (${r.cambios} cambio(s))` : 'Sin cambios'); aRecetas(); } catch(e){ toast(e.message, true); }
+  });
 }
 
 /* ================= eventos generales ================= */
