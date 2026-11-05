@@ -7,7 +7,7 @@
 (() => {
 'use strict';
 const CFG = window.POS_CONFIG || {};
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 
 /* ================= utilidades ================= */
 const $ = s => document.querySelector(s);
@@ -199,7 +199,7 @@ function render(){
   if (!CFG.API_URL) return vSinConfig();
   if (!S.clave) return vClave();
   if (!S.ses) return vLogin();
-  const v = {inicio: vInicio, tipo: vTipo, orden: vOrden, corte: vCorte, admin: vAdmin}[S.vista] || vInicio;
+  const v = {inicio: vInicio, tipo: vTipo, orden: vOrden, corte: vCorte, admin: vAdmin, rutina: vRutina}[S.vista] || vInicio;
   v(); pintaSync();
 }
 function vSinConfig(){
@@ -297,7 +297,7 @@ function vInicio(){
   const errs = r !== 'mesero' && S.errores.length ? `<div class="banner crit">${S.errores.length} operación(es) hechas sin internet no se registraron. <button class="btn sm" data-act="verErrores">Ver</button></div>` : '';
   app().innerHTML = barra() + `<main>${errs}
     <div class="row" style="margin-bottom:14px"><button class="btn pri big" data-act="nueva" style="flex:1;min-width:220px">+ Nueva orden</button>
-      ${r !== 'mesero' ? '<button class="btn big" data-act="corte">Corte de caja</button>' : ''}${r === 'admin' ? '<button class="btn big" data-act="admin">Panel</button>' : ''}</div>
+      ${r !== 'mesero' ? '<button class="btn big" data-act="rutina">Apertura y cierre</button><button class="btn big" data-act="corte">Corte de caja</button>' : ''}${r === 'admin' ? '<button class="btn big" data-act="admin">Panel</button>' : ''}</div>
     <h3>${r === 'mesero' ? 'Mis órdenes abiertas' : 'Mis órdenes'}</h3>
     ${mias.length ? `<div class="grid cards">${mias.map(card).join('')}</div>` : '<div class="empty">No tienes órdenes abiertas.</div>'}
     ${r !== 'mesero' ? `<h3>Órdenes abiertas de los demás</h3>${otras.length ? `<div class="grid cards">${otras.map(card).join('')}</div>` : '<div class="empty">Ninguna.</div>'}` : ''}
@@ -722,10 +722,10 @@ function rango(k){
 async function vAdmin(){
   const A = S.admin; if (!A.desde) [A.desde, A.hasta] = rango('semana');
   if (rol() !== 'admin'){ S.vista = 'inicio'; return render(); }
-  const tabs = [['resumen','Ventas'],['productos','Por producto'],['costos','Costos y ganancia'],['inventario','Inventario'],['recetas','Recetas'],['cortes','Cortes'],['bitacora','Bitácora'],['personal','Personal'],['menu','Menú y precios'],['ajustes','Ajustes']];
+  const tabs = [['resumen','Ventas'],['resultado','Resultado'],['productos','Por producto'],['costos','Costos y ganancia'],['gastos','Gastos'],['nomina','Nómina'],['marketing','Marketing'],['inventario','Inventario'],['recetas','Recetas'],['cortes','Cortes'],['bitacora','Bitácora'],['personal','Personal'],['menu','Menú y precios'],['ajustes','Ajustes']];
   app().innerHTML = barra() + `<main><div class="row" style="margin-bottom:6px"><button class="btn" data-act="inicio">← POS</button><h1 style="margin:0">Panel de ventas</h1></div>
     <nav class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" aria-current="${A.tab === k}">${l}</button>`).join('')}</nav>
-    ${['resumen','productos','cortes','bitacora','costos'].includes(A.tab) ? `<div class="row" style="margin-bottom:12px">
+    ${['resumen','productos','cortes','bitacora','costos','resultado','gastos'].includes(A.tab) ? `<div class="row" style="margin-bottom:12px">
       ${[['hoy','Hoy'],['ayer','Ayer'],['semana','Esta semana'],['semana_ant','Semana pasada'],['mes','Este mes']].map(([k, l]) => `<button class="chip" data-rg="${k}" aria-pressed="${rango(k)[0] === A.desde && rango(k)[1] === A.hasta}">${l}</button>`).join('')}
       <input type="date" id="dd" class="cell w" value="${A.desde}"> <span>a</span> <input type="date" id="dh" class="cell w" value="${A.hasta}">
       <label class="row small" style="gap:6px"><input type="checkbox" id="vdemo" ${A.demo ? 'checked' : ''} style="width:22px;height:22px"> Ver datos <span class="demo">DEMO</span></label></div>` : ''}
@@ -737,12 +737,18 @@ async function vAdmin(){
   if (dh) dh.onchange = () => { A.hasta = dh.value; if (A.hasta < A.desde) A.desde = A.hasta; A.rep = A.bit = null; vAdmin(); };
   if (vd) vd.onchange = () => { A.demo = vd.checked; A.rep = A.bit = null; vAdmin(); };
   if (!A.respChk){ A.respChk = true; call('admin_config').then(c => { A.ultResp = c.ultimo_respaldo || null; if (S.vista === 'admin') pintaRecordatorio(); }).catch(() => {}); } else pintaRecordatorio();
-  try { await ({resumen: aResumen, productos: aProductos, inventario: aInventario, recetas: aRecetas, costos: aCostos, cortes: aCortes, bitacora: aBitacora, personal: aPersonal, menu: aMenu, ajustes: aAjustes}[A.tab])(); }
+  try { await ({resumen: aResumen, resultado: aResultado, gastos: aGastos, nomina: aNomina, marketing: aMarketing, productos: aProductos, inventario: aInventario, recetas: aRecetas, costos: aCostos, cortes: aCortes, bitacora: aBitacora, personal: aPersonal, menu: aMenu, ajustes: aAjustes}[A.tab])(); }
   catch(e){ $('#abody').innerHTML = `<div class="banner crit">${esc(e.message)}</div>`; }
 }
 function pintaRecordatorio(){
-  const A = S.admin; const dias = A.ultResp ? (Date.now() - new Date(A.ultResp).getTime()) / 864e5 : 999;
-  if (dias < 7 || $('#resprec')) return;
+  const A = S.admin;
+  if (A.emp === undefined){ A.emp = null; call('admin_empleados').then(e => { A.emp = e; if (S.vista === 'admin') pintaRecordatorio(); }).catch(() => {}); }
+  if (A.emp && !$('#nomrec')){
+    const hoyD = DSEM[new Date().getDay()], manD = DSEM[(new Date().getDay() + 1) % 7];
+    const msg = [[hoyD, 'Hoy'], [manD, 'Mañana']].map(([d, c]) => { const g = A.emp.filter(e => e.activo && e.dia_pago === d); return g.length ? `${c} se paga a ${g.map(e => e.nombre).join(', ')}: <b>${money(g.reduce((a, e) => a + Number(e.pago_semanal), 0))}</b>` : ''; }).filter(Boolean).join(' · ');
+    if (msg){ const el = document.createElement('div'); el.className = 'banner'; el.id = 'nomrec'; el.style.background = 'var(--info-bg)'; el.style.color = 'var(--info)'; el.innerHTML = msg + ' <button class="btn sm" data-tab="nomina">Ver nómina</button>'; const nav = $('.tabs'); if (nav){ nav.after(el); el.querySelector('[data-tab]').onclick = () => { A.tab = 'nomina'; vAdmin(); }; } }
+  } const dias = A.ultResp ? (Date.now() - new Date(A.ultResp).getTime()) / 864e5 : 999;
+  if (dias < 7 || $('#resprec') || A.ultResp === undefined) return;
   const el = document.createElement('div'); el.className = 'banner'; el.id = 'resprec';
   el.innerHTML = `${A.ultResp ? `Tu último respaldo fue hace ${Math.floor(dias)} días.` : 'Todavía no has descargado ningún respaldo.'} <button class="btn sm" id="resbtn">Descargar respaldo ahora</button>`;
   const nav = $('.tabs'); if (nav) nav.after(el); $('#resbtn').onclick = async () => { await respaldo(); A.ultResp = new Date().toISOString(); el.remove(); };
@@ -892,6 +898,16 @@ async function aAjustes(){
       <label class="field">Encabezado del ticket<textarea id="cte" rows="3" style="font:16px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg)">${esc(c.ticket_encabezado || '')}</textarea></label>
       <label class="field">Pie del ticket<textarea id="ctp" rows="2" style="font:16px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg)">${esc(c.ticket_pie || '')}</textarea></label>
       <button class="btn pri" id="sv4">Guardar</button></div>
+    <div class="card grid"><h2>Comisiones</h2><p class="muted" style="margin:0">Lo que te cobra cada app y la terminal, en %. Se restan en el Resultado.</p>
+      ${['rappi','didi','uber'].map(k => `<label class="field">${CANAL[k]} (%)<input id="co_${k}" class="cell" inputmode="decimal" value="${esc((c.comision_apps || {})[k] ?? 0)}"></label>`).join('')}
+      <label class="field">Terminal de tarjeta (%)<input id="co_t" class="cell" inputmode="decimal" value="${esc(c.comision_tarjeta ?? 0)}"></label>
+      <label class="row"><input type="checkbox" id="co_ok" ${c.comision_apps_confirmada ? 'checked' : ''} style="width:22px;height:22px"> Comisiones confirmadas</label>
+      <label class="row"><input type="checkbox" id="co_iva" ${c.iva_en_resultado ? 'checked' : ''} style="width:22px;height:22px"> Restar el IVA en el Resultado</label>
+      <button class="btn pri" id="sv5">Guardar</button></div>
+    <div class="card grid"><h2>Apertura y cierre</h2><p class="muted" style="margin:0">Un punto por renglón. Bris los marca en la tablet.</p>
+      <label class="field">Apertura<textarea id="ra" rows="6" style="font:16px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg)">${esc(((c.rutina_items || {}).apertura || []).join('\n'))}</textarea></label>
+      <label class="field">Cierre<textarea id="rc" rows="6" style="font:16px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg)">${esc(((c.rutina_items || {}).cierre || []).join('\n'))}</textarea></label>
+      <button class="btn pri" id="sv6">Guardar</button></div>
     <div class="card grid"><h2>Respaldo</h2><p class="muted" style="margin:0">Descarga toda la información (ventas, cortes, inventario, recetas, personal sin PIN) en un archivo. Hazlo cada semana y guárdalo en tu computadora o en la nube.</p>
       <p style="margin:0">Último respaldo: <b>${c.ultimo_respaldo ? ftime(c.ultimo_respaldo) : 'nunca'}</b></p>
       <button class="btn pri" id="bresp">Descargar respaldo</button></div></div>`;
@@ -903,6 +919,9 @@ async function aAjustes(){
   $('#sv4').onclick = () => ok(async () => { await g('propinas_activas', $('#cprop').checked); await g('iva_incluido', $('#civa').checked); await g('ticket_encabezado', $('#cte').value.trim()); await g('ticket_pie', $('#ctp').value.trim());
     Object.assign(S.ses.config, {propinas_activas: $('#cprop').checked, ticket_encabezado: $('#cte').value.trim(), ticket_pie: $('#ctp').value.trim()}); });
   $('#bresp').onclick = respaldo;
+  $('#sv5').onclick = () => ok(async () => { await g('comision_apps', {rappi: Number($('#co_rappi').value) || 0, didi: Number($('#co_didi').value) || 0, uber: Number($('#co_uber').value) || 0});
+    await g('comision_tarjeta', Number($('#co_t').value) || 0); await g('comision_apps_confirmada', $('#co_ok').checked); await g('iva_en_resultado', $('#co_iva').checked); });
+  $('#sv6').onclick = () => ok(async () => { const sp = id => $(id).value.split('\n').map(x => x.trim()).filter(Boolean).slice(0, 15); await g('rutina_items', {apertura: sp('#ra'), cierre: sp('#rc')}); });
 }
 async function respaldo(){
   try { const r = await call('admin_respaldo'); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(r)], {type: 'application/json'}));
@@ -911,6 +930,216 @@ async function respaldo(){
   catch(e){ toast(e.message, true); }
 }
 
+
+/* ---------- resultado (P&L) y escenarios ---------- */
+const pctTxt = x => x == null ? '—' : (Math.round(x * 1000) / 10).toLocaleString('es-MX') + ' %';
+let escTmp = {nombre: 'Mi escenario', precio: 0, ordenes: 0, variables: 0, pub_semana: 0};
+async function aResultado(){
+  const A = S.admin; const r = await call('admin_resultado', {p_desde: A.desde, p_hasta: A.hasta, p_demo: A.demo}); A.res = r;
+  const varEst = r.modelo?.variables_estimado; const estMes = varEst ? varEst.conceptos.reduce((a, c) => a + Number(c.monto), 0) * 4.33 / (varEst.periodo_semanas || 4) : 0;
+  const estPeriodo = r2(estMes * r.dias / 30.4);
+  const fila = (label, v, opts = {}) => `<tr class="${opts.cls || ''}"><td>${opts.indent ? '&nbsp;&nbsp;&nbsp;' : ''}${label}${opts.tag ? ' ' + opts.tag : ''}</td><td class="n">${opts.neg && v ? '−' : ''}${money(v)}</td><td class="n muted">${r.ventas && !opts.noPct ? pctTxt(v / r.ventas) : ''}</td></tr>`;
+  const avisos = [];
+  if (!r.comisiones_confirmadas) avisos.push('las <b>comisiones de Rappi, DiDi y Uber</b> están en 0 % (captúralas en Ajustes)');
+  if (!r.insumos) avisos.push(`no hay <b>gastos de insumos</b> registrados en este periodo (tu estimado anterior sería ${money(estPeriodo)})`);
+  if (r.nomina_estimada) avisos.push('la <b>nómina</b> es estimada con el pago semanal (registra los pagos en Nómina)');
+  const pe = r.punto_equilibrio;
+  $('#abody').innerHTML = `${A.demo ? '<div class="banner">Incluye ventas DEMO.</div>' : ''}
+    ${avisos.length ? `<div class="banner">Para que el resultado sea exacto: ${avisos.join('; ')}.</div>` : ''}
+    <div class="grid kpis">
+      <div class="kpi"><div class="l">Ventas</div><div class="v num">${money(r.ventas)}</div><div class="small muted">${r.ordenes} órdenes · ${r.dias} días</div></div>
+      <div class="kpi"><div class="l">Utilidad</div><div class="v num ${r.utilidad < 0 ? 'neg' : 'pos'}">${money(r.utilidad)}</div></div>
+      <div class="kpi"><div class="l">Margen</div><div class="v num">${pctTxt(r.margen)}</div></div>
+      <div class="kpi"><div class="l">Punto de equilibrio</div><div class="v num">${pe ? money(pe) : '—'}</div><div class="small muted">${pe ? (r.ventas >= pe ? 'superado ✓' : `faltan ${money(pe - r.ventas)}`) : 'ventas para no perder ni ganar'}</div></div></div>
+    <div class="two"><div><h3>Estado de resultados</h3><div class="tbl"><table><tbody>
+      ${fila('<b>Ventas</b>', r.ventas, {noPct: true})}
+      ${r.iva ? fila('IVA incluido en precios', r.iva, {neg: true, indent: true}) : ''}
+      ${fila('Comisiones de apps', r.comision_apps, {neg: true, indent: true, tag: r.comisiones_confirmadas ? '' : '<span class="tag pend">por confirmar</span>'})}
+      ${r.comision_tarjeta ? fila('Comisión de terminal', r.comision_tarjeta, {neg: true, indent: true}) : ''}
+      ${fila('Insumos y gastos variables', r.insumos, {neg: true, indent: true, tag: r.insumos ? '' : '<span class="tag pend">sin registrar</span>'})}
+      ${fila('Nómina', r.nomina, {neg: true, indent: true, tag: r.nomina_estimada ? '<span class="tag pend">estimada</span>' : ''})}
+      ${fila('Gastos fijos', r.fijos, {neg: true, indent: true})}
+      ${fila('Publicidad', r.publicidad, {neg: true, indent: true})}
+      <tr><td><b>Utilidad</b></td><td class="n"><b class="${r.utilidad < 0 ? 'neg' : 'pos'}">${money(r.utilidad)}</b></td><td class="n"><b>${pctTxt(r.margen)}</b></td></tr>
+      </tbody></table></div>
+      <p class="note">Referencias: costo teórico de ingredientes según recetas medidas: <b>${money(r.costo_teorico)}</b>. Propinas registradas (no son ingreso del negocio): <b>${money(r.propinas)}</b>. Gastos fijos y nómina se prorratean por día; la publicidad, por los días de cada campaña.</p></div>
+      <div><h3>Ventas por semana</h3>${r.por_semana.length ? barras(r.por_semana, x => 'Sem. ' + fdate(x.semana), x => x.ventas) : '<div class="empty">Sin ventas en el periodo.</div>'}
+        <h3>Gastos fijos del periodo</h3>${tabla([['Concepto', x => esc(x.concepto)], ['Monto', x => money(x.monto), 'n']], r.fijos_detalle, 'Captura tus gastos fijos en la pestaña Gastos.')}</div></div>
+    <h3>Escenarios: ¿qué pasa si…?</h3><div id="escen"></div>`;
+  pintaEscenarios(r, estMes);
+}
+function baseMensual(r, estMes){
+  const m = r.modelo?.ventas_modelo || {}; const sem = Number(m.semanas_mes) || 4.33;
+  const real = r.ventas > 0 && r.dias >= 7;
+  const ventas = real ? r.ventas * 30.4 / r.dias : (Number(m.comandas_dia) * (Number(m.dias_semana) || 5) + Number(m.comandas_finde)) * Number(m.ticket) * sem;
+  const variables = real && r.insumos ? r.insumos * 30.4 / r.dias : estMes;
+  const comPct = r.ventas ? (r.comision_apps + r.comision_tarjeta + r.iva) / r.ventas : 0;
+  const nomina = real && !r.nomina_estimada ? r.nomina * 30.4 / r.dias : (r.nomina * 30.4 / r.dias);
+  const fijos = r.fijos * 30.4 / r.dias;
+  return {fuente: real ? 'ventas reales del periodo' : 'tu modelo anterior (comandas × ticket)', ventas, variables, comPct, nomina, fijos, sem};
+}
+function calcEsc(b, e){
+  const ventas = b.ventas * (1 + (Number(e.precio) || 0) / 100) * (1 + (Number(e.ordenes) || 0) / 100);
+  const variables = b.variables * (1 + (Number(e.ordenes) || 0) / 100) * (1 + (Number(e.variables) || 0) / 100);
+  const com = ventas * b.comPct; const pub = (Number(e.pub_semana) || 0) * b.sem;
+  const util = ventas - variables - com - b.nomina - b.fijos - pub;
+  return {ventas, variables, com, pub, util, margen: ventas ? util / ventas : null};
+}
+function pintaEscenarios(r, estMes){
+  const b = baseMensual(r, estMes); const lista = [...(r.modelo?.escenarios || [])];
+  const cols = [{nombre: 'Hoy (base)', precio: 0, ordenes: 0, variables: 0, pub_semana: 0}, ...lista, escTmp];
+  const calc = cols.map(e => calcEsc(b, e));
+  const mc = b.ventas ? 1 - (b.variables / b.ventas) - b.comPct : 0;
+  $('#escen').innerHTML = `<p class="muted" style="margin-top:0">Cifras por mes. Base: ${esc(b.fuente)}. Ajusta tu escenario en la última columna.</p>
+    <div class="tbl"><table><thead><tr><th></th>${cols.map((e, i) => `<th class="n">${i === cols.length - 1 ? `<input class="cell w" id="en" value="${esc(e.nombre)}" style="width:150px">` : esc(e.nombre)}</th>`).join('')}</tr></thead><tbody>
+      ${[['precio','Subir precios (%)'],['ordenes','Más órdenes (%)'],['variables','Más costo de insumos (%)'],['pub_semana','Publicidad por semana ($)']].map(([k, l]) => `<tr><td>${l}</td>${cols.map((e, i) => `<td class="n">${i === cols.length - 1 ? `<input class="cell" data-esc="${k}" inputmode="decimal" value="${esc(e[k])}">` : (k === 'pub_semana' ? money(e[k]) : (e[k] || 0) + ' %')}</td>`).join('')}</tr>`).join('')}
+      <tr><td><b>Ventas del mes</b></td>${calc.map(c => `<td class="n"><b>${money(Math.round(c.ventas))}</b></td>`).join('')}</tr>
+      <tr><td>Insumos y variables</td>${calc.map(c => `<td class="n">−${money(Math.round(c.variables))}</td>`).join('')}</tr>
+      <tr><td>Comisiones</td>${calc.map(c => `<td class="n">−${money(Math.round(c.com))}</td>`).join('')}</tr>
+      <tr><td>Nómina y fijos</td>${calc.map(() => `<td class="n">−${money(Math.round(b.nomina + b.fijos))}</td>`).join('')}</tr>
+      <tr><td>Publicidad</td>${calc.map(c => `<td class="n">−${money(Math.round(c.pub))}</td>`).join('')}</tr>
+      <tr><td><b>Utilidad del mes</b></td>${calc.map(c => `<td class="n"><b class="${c.util < 0 ? 'neg' : 'pos'}">${money(Math.round(c.util))}</b></td>`).join('')}</tr>
+      <tr><td>Margen</td>${calc.map(c => `<td class="n">${pctTxt(c.margen)}</td>`).join('')}</tr>
+      <tr><td>Contra hoy</td>${calc.map((c, i) => `<td class="n">${i ? `<b class="${c.util - calc[0].util < 0 ? 'neg' : 'pos'}">${c.util - calc[0].util >= 0 ? '+' : ''}${money(Math.round(c.util - calc[0].util))}</b>` : '—'}</td>`).join('')}</tr>
+    </tbody></table></div>
+    <div class="row" style="margin-top:10px"><button class="btn pri" id="escSave">Guardar mi escenario</button>${lista.length ? `<select id="escDel" class="cell w"><option value="">Quitar un escenario…</option>${lista.map((e, i) => `<option value="${i}">${esc(e.nombre)}</option>`).join('')}</select>` : ''}</div>
+    <p class="note">Con tu margen de contribución actual (${pctTxt(mc)}), <b>$1,500 de publicidad por semana (${money(Math.round(1500 * b.sem))} al mes) se pagan solos si generan ${mc > 0 ? money(Math.round(1500 * b.sem / mc)) : '—'} de ventas extra al mes</b>. Revisa el resultado real de cada campaña en la pestaña Marketing.</p>`;
+  $('#escen').querySelectorAll('[data-esc]').forEach(i => i.onchange = () => { escTmp[i.dataset.esc] = Number(i.value) || 0; escTmp.nombre = $('#en').value; pintaEscenarios(r, estMes); });
+  $('#en').onchange = () => { escTmp.nombre = $('#en').value; };
+  $('#escSave').onclick = async () => { escTmp.nombre = $('#en').value.trim() || 'Mi escenario'; const nl = [...lista, {...escTmp}].slice(-6);
+    try { await call('admin_config_guardar', {p_clave: 'escenarios', p_valor: nl}); toast('Escenario guardado'); r.modelo.escenarios = nl; escTmp = {nombre: 'Mi escenario', precio: 0, ordenes: 0, variables: 0, pub_semana: 0}; pintaEscenarios(r, estMes); } catch(e){ toast(e.message, true); } };
+  const del = $('#escDel'); if (del) del.onchange = async () => { if (del.value === '') return; const nl = lista.filter((_, i) => i !== Number(del.value));
+    try { await call('admin_config_guardar', {p_clave: 'escenarios', p_valor: nl}); r.modelo.escenarios = nl; pintaEscenarios(r, estMes); } catch(e){ toast(e.message, true); } };
+}
+
+/* ---------- gastos ---------- */
+const CATG = {insumos: 'Insumos', gas: 'Gas', desechables: 'Desechables', mantenimiento: 'Mantenimiento', otro: 'Otro'};
+async function aGastos(){
+  const A = S.admin; const d = await call('admin_gastos', {p_desde: A.desde, p_hasta: A.hasta, p_demo: A.demo});
+  const porCat = {}; d.gastos.forEach(g => porCat[g.categoria] = (porCat[g.categoria] || 0) + Number(g.monto));
+  const fijosMes = d.fijos.filter(f => f.activo).reduce((a, f) => a + Number(f.monto_mensual), 0);
+  $('#abody').innerHTML = `<div class="two"><div><h3 style="margin-top:0">Registrar un gasto</h3><div class="card grid">
+      <div class="grid" style="grid-template-columns:1fr 1fr;gap:10px">
+        <label class="field">Fecha<input type="date" id="gf" class="cell w" style="width:100%" value="${hoyISO()}"></label>
+        <label class="field">Categoría<select id="gc" class="cell w" style="width:100%">${Object.entries(CATG).map(([k, l]) => `<option value="${k}">${l}</option>`).join('')}</select></label>
+        <label class="field">Concepto<input id="gn" class="cell w" style="width:100%" placeholder="Carnitas, verdura de la semana…"></label>
+        <label class="field">Monto ($)<input id="gm" class="cell" style="width:100%" inputmode="decimal"></label>
+        <label class="field">Proveedor<input id="gp" class="cell w" style="width:100%"></label>
+        <label class="field">Nota<input id="gx" class="cell w" style="width:100%"></label></div>
+      <button class="btn pri" id="gsave">Guardar gasto</button>
+      <p class="note" style="margin:0">Las compras que registras en Inventario con su costo ya se agregan aquí solas: no las captures dos veces.</p></div></div>
+    <div><h3 style="margin-top:0">Gastos fijos mensuales · ${money(fijosMes)}</h3>${tabla([['Concepto', f => `<input class="cell w" data-fc="${esc(f.id)}" value="${esc(f.concepto)}" style="width:170px">`], ['Mensual', f => `<input class="cell" data-fm="${esc(f.id)}" inputmode="decimal" value="${esc(f.monto_mensual)}">`, 'n'],
+        ['Activo', f => `<input type="checkbox" data-fa="${esc(f.id)}" ${f.activo ? 'checked' : ''} style="width:22px;height:22px">`], ['', f => `<button class="btn sm" data-fs="${esc(f.id)}">Guardar</button>`]], d.fijos)}
+      <div class="card row" style="margin-top:8px"><input id="fnc" class="cell w" placeholder="Nuevo concepto (gas, internet, contador…)" style="flex:1"><input id="fnm" class="cell" inputmode="decimal" placeholder="$ al mes"><button class="btn" id="fadd">Agregar</button></div></div></div>
+    <h3>Gastos del periodo · ${money(d.gastos.reduce((a, g) => a + Number(g.monto), 0))}</h3>
+    <div class="row" style="margin-bottom:8px">${Object.entries(porCat).map(([k, v]) => `<span class="tag">${CATG[k] || k}: ${money(v)}</span>`).join('')}</div>
+    ${tabla([['Fecha', g => fdate(g.fecha)], ['Categoría', g => CATG[g.categoria] || g.categoria], ['Concepto', g => esc(g.concepto) + (g.origen === 'inventario' ? ' <span class="tag t-mesa">inventario</span>' : '')], ['Proveedor', g => esc(g.proveedor || '')], ['Monto', g => money(g.monto), 'n'],
+      ['', g => g.origen === 'manual' ? `<button class="btn sm" data-gd="${esc(g.id)}">Borrar</button>` : '']], d.gastos, 'Sin gastos registrados en este periodo.')}`;
+  $('#gsave').onclick = async () => { try { await call('admin_gasto_guardar', {p: {fecha: $('#gf').value, categoria: $('#gc').value, concepto: $('#gn').value, monto: $('#gm').value, proveedor: $('#gp').value, nota: $('#gx').value}}); toast('Gasto guardado'); aGastos(); } catch(e){ toast(e.message, true); } };
+  app().querySelectorAll('[data-gd]').forEach(b => b.onclick = async () => { if (!b.dataset.sure){ b.dataset.sure = 1; b.textContent = '¿Seguro?'; return; } try { await call('admin_gasto_borrar', {p_id: b.dataset.gd}); toast('Gasto borrado'); aGastos(); } catch(e){ toast(e.message, true); } });
+  app().querySelectorAll('[data-fs]').forEach(b => b.onclick = async () => { const id = b.dataset.fs;
+    try { await call('admin_gasto_fijo_guardar', {p: {id, concepto: app().querySelector(`[data-fc="${id}"]`).value, monto_mensual: app().querySelector(`[data-fm="${id}"]`).value, activo: app().querySelector(`[data-fa="${id}"]`).checked}}); toast('Guardado'); aGastos(); } catch(e){ toast(e.message, true); } });
+  $('#fadd').onclick = async () => { try { await call('admin_gasto_fijo_guardar', {p: {concepto: $('#fnc').value, monto_mensual: $('#fnm').value}}); toast('Agregado'); aGastos(); } catch(e){ toast(e.message, true); } };
+}
+
+/* ---------- nómina ---------- */
+let nomFecha = null;
+function proximoDia(d){ const h = new Date(hoyISO() + 'T12:00:00'); const t = DSEM.indexOf(d); let k = (t - h.getDay() + 7) % 7; return addDays(hoyISO(), k); }
+async function aNomina(){
+  const emp = await call('admin_empleados'); S.admin.emp = emp;
+  const dias = [...new Set(emp.filter(e => e.activo).map(e => e.dia_pago))];
+  if (!nomFecha) nomFecha = dias.map(proximoDia).sort()[0] || hoyISO();
+  const n = await call('admin_nomina', {p_fecha: nomFecha});
+  const pagada = n.lineas.length && n.lineas.every(l => l.pagado);
+  $('#abody').innerHTML = `<div class="row" style="margin-bottom:12px">${dias.map(d => { const f = proximoDia(d); return `<button class="chip" data-nf="${f}" aria-pressed="${f === nomFecha}">${fdate(f)}</button>`; }).join('')}
+      <input type="date" id="nfd" class="cell w" value="${nomFecha}"><span class="muted small">Día de pago</span></div>
+    <h3 style="margin-top:0">Nómina del ${fdate(nomFecha)} ${pagada ? '<span class="tag t-mesa">pagada</span>' : ''}</h3>
+    ${n.lineas.length ? `<div class="tbl"><table><thead><tr><th>Persona</th><th class="n">Pago semanal</th><th class="n">Días</th><th class="n">Extras $</th><th class="n">Bonos $</th><th class="n">Adelantos $</th><th class="n">Total</th></tr></thead><tbody>
+      ${n.lineas.map((l, i) => `<tr><td><b>${esc(l.nombre)}</b><br><span class="muted small">${esc(l.puesto || '')}</span></td><td class="n">${money(l.base)}</td>
+        ${['dias','extras','bonos','adelantos'].map(k => `<td class="n"><input class="cell" data-nl="${i}" data-k="${k}" inputmode="decimal" value="${esc(l[k])}" style="width:80px" ${l.pagado ? 'disabled' : ''}></td>`).join('')}
+        <td class="n"><b id="nt${i}">${money(l.total)}</b></td></tr>`).join('')}
+      <tr><td colspan="6"><b>Total a pagar</b></td><td class="n"><b id="ntt"></b></td></tr></tbody></table></div>
+      ${pagada ? '<p class="note">Esta nómina ya se marcó como pagada.</p>' : `<div class="row" style="margin-top:10px"><button class="btn" id="nsv">Guardar borrador</button><button class="btn pri" id="npg">Marcar como pagada</button></div>`}
+      <p class="note">Total = pago semanal × días ÷ 7 + extras + bonos − adelantos. 7 días = semana completa. No incluye IMSS ni ISR: pásale el total a tu contador.</p>`
+      : '<div class="empty">Nadie cobra ese día.</div>'}
+    <div class="two" style="margin-top:16px"><div><h3>Personal y pago semanal</h3>${tabla([['Nombre', e => `<b>${esc(e.nombre)}</b>${e.activo ? '' : ' <span class="tag">baja</span>'}<br><span class="muted small">${esc(e.puesto || '')}</span>`], ['Paga', e => e.dia_pago], ['Pago semanal', e => money(e.pago_semanal), 'n'], ['', e => `<button class="btn sm" data-ee="${esc(e.id)}">Editar</button>`]], emp)}
+      <div class="row" style="margin-top:8px"><button class="btn" id="enew">+ Persona</button><span class="muted small">Nómina mensual: <b>${money(Math.round(emp.filter(e => e.activo).reduce((a, e) => a + Number(e.pago_semanal), 0) * 4.33))}</b></span></div></div>
+    <div><h3>Pagos anteriores</h3>${tabla([['Fecha', h => fdate(h.fecha_pago)], ['Personas', h => h.personas, 'n'], ['Total', h => money(h.total), 'n'], ['Estado', h => h.pagado ? 'Pagada' : '<span class="tag pend">borrador</span>'], ['', h => `<button class="btn sm" data-nh="${h.fecha_pago}">Ver</button>`]], n.historial, 'Todavía no hay nóminas registradas.')}</div></div>`;
+  const lineas = n.lineas.map(l => ({...l}));
+  const recalc = () => { let t = 0; lineas.forEach((l, i) => { const tot = r2(Number(l.base) * Number(l.dias) / 7 + Number(l.extras || 0) + Number(l.bonos || 0) - Number(l.adelantos || 0)); l.total = tot; t += tot; const el = $('#nt' + i); if (el) el.textContent = money(tot); }); const tt = $('#ntt'); if (tt) tt.textContent = money(t); };
+  app().querySelectorAll('[data-nl]').forEach(i => i.oninput = () => { lineas[Number(i.dataset.nl)][i.dataset.k] = i.value === '' ? 0 : Number(i.value); recalc(); });
+  recalc();
+  app().querySelectorAll('[data-nf]').forEach(b => b.onclick = () => { nomFecha = b.dataset.nf; aNomina(); });
+  app().querySelectorAll('[data-nh]').forEach(b => b.onclick = () => { nomFecha = b.dataset.nh; aNomina(); });
+  $('#nfd').onchange = () => { nomFecha = $('#nfd').value; aNomina(); };
+  const guarda = async pagar => { try { const r = await call('admin_nomina_guardar', {p_fecha: nomFecha, p_lineas: lineas, p_pagar: pagar}); toast(pagar ? `Nómina pagada: ${money(r.total)}` : 'Borrador guardado'); aNomina(); } catch(e){ toast(e.message, true); } };
+  const ns = $('#nsv'); if (ns) ns.onclick = () => guarda(false);
+  const np = $('#npg'); if (np) np.onclick = () => { if (!np.dataset.sure){ np.dataset.sure = 1; np.textContent = '¿Confirmas el pago? Toca otra vez'; return; } guarda(true); };
+  $('#enew').onclick = () => formEmpleado(null);
+  app().querySelectorAll('[data-ee]').forEach(b => b.onclick = () => formEmpleado(emp.find(e => e.id === b.dataset.ee)));
+}
+function formEmpleado(e){
+  abreModal(`<div class="sheet"><h2>${e ? 'Editar' : 'Nueva'} persona</h2>
+    <div class="grid" style="grid-template-columns:1fr 1fr;gap:10px">
+      <label class="field">Nombre<input id="em_n" value="${esc(e?.nombre || '')}"></label><label class="field">Puesto<input id="em_p" value="${esc(e?.puesto || '')}"></label>
+      <label class="field">Pago semanal ($)<input id="em_s" inputmode="decimal" value="${esc(e?.pago_semanal ?? '')}"></label>
+      <label class="field">Día de pago<select id="em_d">${['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'].map(d => `<option ${(e?.dia_pago || 'Dom') === d ? 'selected' : ''}>${d}</option>`).join('')}</select></label>
+      <label class="field">Fecha de ingreso<input type="date" id="em_i" value="${esc(e?.ingreso || '')}"></label><label class="field">Teléfono<input id="em_t" value="${esc(e?.telefono || '')}"></label></div>
+    <label class="field">Notas<input id="em_x" value="${esc(e?.notas || '')}"></label>
+    ${e ? `<label class="row"><input type="checkbox" id="em_a" ${e.activo ? 'checked' : ''} style="width:22px;height:22px"> Activo</label>` : ''}
+    <p class="note" style="margin:0">Esto es solo para la nómina. Para que alguien use la tablet, dalo de alta con PIN en la pestaña Personal.</p>
+    <div class="foot"><button class="btn big" data-x="no">Cancelar</button><button class="btn pri big" data-x="si">Guardar</button></div></div>`);
+  dlg().querySelector('[data-x="no"]').onclick = cierraModal;
+  dlg().querySelector('[data-x="si"]').onclick = async () => {
+    try { await call('admin_empleado_guardar', {p: {id: e?.id || null, nombre: $('#em_n').value, puesto: $('#em_p').value, pago_semanal: $('#em_s').value, dia_pago: $('#em_d').value, ingreso: $('#em_i').value, telefono: $('#em_t').value, notas: $('#em_x').value, activo: $('#em_a') ? $('#em_a').checked : true}});
+      cierraModal(); toast('Guardado'); S.admin.emp = undefined; aNomina(); } catch(err){ toast(err.message, true); }
+  };
+}
+
+/* ---------- marketing ---------- */
+async function aMarketing(){
+  const d = await call('admin_campanas', {p_demo: S.admin.demo});
+  $('#abody').innerHTML = `<p class="muted" style="margin-top:0">Registra cada campaña (redes sociales, letreros, volanteo) con su costo y fechas. El sistema compara las ventas diarias durante la campaña contra las 4 semanas anteriores y calcula si se pagó sola, con tu margen de contribución de ${pctTxt(d.margen_contribucion)}${d.margen_estimado ? ' (estimado hasta tener 2 semanas de ventas y gastos registrados)' : ''}.</p>
+    <div class="card grid" style="margin-bottom:16px"><h2 style="margin:0">Nueva campaña</h2>
+      <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px">
+        <label class="field">Nombre<input id="cn2" class="cell w" style="width:100%" placeholder="Facebook noviembre"></label>
+        <label class="field">Canal<input id="cc2" class="cell w" style="width:100%" list="canales" placeholder="Facebook, Instagram, letrero…"><datalist id="canales"><option value="Facebook"><option value="Instagram"><option value="TikTok"><option value="Letreros"><option value="Volanteo"><option value="Promoción en apps"></datalist></label>
+        <label class="field">Inicio<input type="date" id="ci2" class="cell w" style="width:100%" value="${hoyISO()}"></label>
+        <label class="field">Fin<input type="date" id="cf2" class="cell w" style="width:100%" value="${addDays(hoyISO(), 6)}"></label>
+        <label class="field">Inversión total ($)<input id="cm2" class="cell" style="width:100%" inputmode="decimal" placeholder="1500"></label></div>
+      <button class="btn pri" id="csv2">Guardar campaña</button></div>
+    ${d.campanas.length ? `<div class="two">${d.campanas.map(c => { const ok = c.retorno != null && c.retorno >= 0;
+      return `<div class="card grid"><div class="row"><b style="font-size:18px">${esc(c.nombre)}</b><span class="spacer"></span>${c.en_curso ? '<span class="tag pend">en curso</span>' : ''}<span class="tag">${esc(c.canal || '')}</span></div>
+        <div class="muted small">${fdate(c.inicio)} – ${fdate(c.fin)} · ${c.dias} días · inversión <b>${money(c.monto)}</b></div>
+        <div class="tbl"><table><tbody>
+          <tr><td>Venta diaria antes (4 semanas)</td><td class="n">${money(c.antes.diario)}</td></tr>
+          <tr><td>Venta diaria durante</td><td class="n"><b>${money(c.durante.diario)}</b></td></tr>
+          <tr><td>Ticket promedio antes → durante</td><td class="n">${c.antes.ticket ? money(c.antes.ticket) : '—'} → ${c.durante.ticket ? money(c.durante.ticket) : '—'}</td></tr>
+          <tr><td>Ventas extra</td><td class="n"><b class="${c.extra < 0 ? 'neg' : 'pos'}">${money(c.extra)}</b></td></tr>
+          <tr><td>Retorno (ganancia extra − inversión)</td><td class="n"><b class="${ok ? 'pos' : 'neg'}">${c.retorno == null ? '—' : pctTxt(c.retorno)}</b></td></tr></tbody></table></div>
+        <p class="note" style="margin:0">${c.en_curso ? 'La campaña sigue: el resultado cambia cada día.' : c.retorno == null ? '' : ok ? 'Se pagó sola y dejó ganancia.' : 'No se pagó sola: prueba otro canal, otro mensaje o otro horario.'} ${c.antes.ventas === 0 ? 'Sin ventas registradas antes de la campaña: la comparación todavía no es confiable.' : ''}</p>
+        <button class="btn sm" data-ce="${esc(c.id)}" style="justify-self:start">Editar</button></div>`; }).join('')}</div>` : '<div class="empty">Sin campañas registradas.</div>'}
+    <p class="note">Retorno = (ventas extra × margen de contribución − inversión) ÷ inversión. Las ventas pueden subir o bajar por otras razones (quincena, clima, fechas especiales): compara varias campañas antes de decidir.</p>`;
+  const guardar = async id => { try { await call('admin_campana_guardar', {p: {id: id || null, nombre: $('#cn2').value, canal: $('#cc2').value, inicio: $('#ci2').value, fin: $('#cf2').value, monto: $('#cm2').value}}); toast('Campaña guardada'); aMarketing(); } catch(e){ toast(e.message, true); } };
+  let edit = null; $('#csv2').onclick = () => guardar(edit);
+  app().querySelectorAll('[data-ce]').forEach(b => b.onclick = () => { const c = d.campanas.find(x => x.id === b.dataset.ce); edit = c.id;
+    $('#cn2').value = c.nombre; $('#cc2').value = c.canal || ''; $('#ci2').value = c.inicio; $('#cf2').value = c.fin; $('#cm2').value = c.monto; $('#csv2').textContent = 'Guardar cambios'; window.scrollTo({top: 0, behavior: 'smooth'}); });
+}
+
+/* ---------- rutinas de apertura y cierre ---------- */
+async function vRutina(){
+  app().innerHTML = barra() + `<main><div class="row" style="margin-bottom:10px"><button class="btn" data-act="inicio">← Volver</button><h1 style="margin:0">Apertura y cierre</h1></div><div id="rbody"><p class="muted">Cargando…</p></div></main>`; pintaSync();
+  let d; try { d = await call('pos_rutina'); } catch(e){ $('#rbody').innerHTML = `<div class="banner crit">${esc(e.message)}</div>`; return; }
+  const pinta = () => {
+    $('#rbody').innerHTML = `<p class="muted" style="margin-top:0">${fdate(d.fecha)}. Toca cada punto al terminarlo: queda registrado quién y a qué hora.</p><div class="two">
+      ${['apertura','cierre'].map(t => { const items = d.items?.[t] || []; const hechos = items.filter((_, i) => d[t][i]?.hecho).length;
+        return `<div class="card"><div class="row"><h2 style="margin:0">${t === 'apertura' ? 'Apertura' : 'Cierre'}</h2><span class="spacer"></span><span class="tag ${hechos === items.length ? 't-mesa' : 'pend'}">${hechos} de ${items.length}</span></div>
+        ${items.map((txt, i) => { const m = d[t][i]; return `<button class="chk ${m?.hecho ? 'on' : ''}" data-rt="${t}" data-ri="${i}"><span class="box">${m?.hecho ? '✓' : ''}</span><span><b>${esc(txt)}</b>${m?.hecho ? `<br><span class="muted small">${esc(m.quien)} · ${new Date(m.cuando).toLocaleTimeString('es-MX', {hour: '2-digit', minute: '2-digit'})}</span>` : ''}</span></button>`; }).join('')}</div>`; }).join('')}</div>`;
+    $('#rbody').querySelectorAll('[data-rt]').forEach(b => b.onclick = async () => { const t = b.dataset.rt, i = Number(b.dataset.ri);
+      try { d = await call('pos_rutina_marcar', {p_tipo: t, p_idx: i, p_hecho: !d[t][i]?.hecho}); pinta(); } catch(e){ toast(e.message, true); } });
+  };
+  pinta();
+}
 
 /* ---------- costos y ganancia ---------- */
 let costoVista = 'vendido';
@@ -1151,6 +1380,7 @@ document.addEventListener('click', async e => {
   if (a === 'mover') return moverMesa();
   if (a === 'corte'){ S.vista = 'corte'; return render(); }
   if (a === 'admin'){ S.vista = 'admin'; return render(); }
+  if (a === 'rutina'){ S.vista = 'rutina'; return render(); }
   if (a === 'verErrores'){
     abreModal(`<div class="sheet"><h2>Operaciones no registradas</h2><p class="muted">Se hicieron sin internet y el servidor las rechazó. Captúralas de nuevo si hace falta.</p>
       ${S.errores.map(x => `<div class="payrow"><span>${ftime(x.ts)} · ${esc(x.fn === 'pos_cobrar' ? 'Cobro' : 'Orden')}</span><span>${esc(x.msg)}</span></div>`).join('')}

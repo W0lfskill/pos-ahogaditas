@@ -190,3 +190,8 @@ td.w{white-space:normal;min-width:200px}
   h1{font-size:28px}
   .cats{top:96px}
 }
+.chk{display:flex;gap:12px;align-items:flex-start;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid var(--line);padding:12px 0;min-height:56px}
+.chk:last-child{border-bottom:0}
+.chk .box{flex:none;width:30px;height:30px;border-radius:8px;border:2px solid var(--muted);display:grid;place-items:center;font-weight:800;color:#fff}
+.chk.on .box{background:var(--ok);border-color:var(--ok)}
+.chk.on b{color:var(--muted);text-decoration:line-through}
