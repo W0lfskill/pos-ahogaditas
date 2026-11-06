@@ -7,7 +7,7 @@
 (() => {
 'use strict';
 const CFG = window.POS_CONFIG || {};
-const VERSION = '1.3.0';
+const VERSION = '1.3.1';
 
 /* ================= utilidades ================= */
 const $ = s => document.querySelector(s);
