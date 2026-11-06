@@ -195,3 +195,11 @@ td.w{white-space:normal;min-width:200px}
 .chk .box{flex:none;width:30px;height:30px;border-radius:8px;border:2px solid var(--muted);display:grid;place-items:center;font-weight:800;color:#fff}
 .chk.on .box{background:var(--ok);border-color:var(--ok)}
 .chk.on b{color:var(--muted);text-decoration:line-through}
+
+/* v1.4 · cancelar orden y verificación en dos pasos */
+.btn.cx{color:var(--crit);border-color:var(--crit)}
+.ordwrap{display:flex;flex-direction:column;gap:6px;min-width:0}
+.qr{display:flex;flex-wrap:wrap;gap:16px;align-items:center}
+.qr .img{background:#fff;padding:10px;border-radius:12px;line-height:0}
+.qr .img svg{width:210px;height:210px}
+.clave2fa{font:700 18px ui-monospace,Menlo,monospace;letter-spacing:1px;word-break:break-all;user-select:all}

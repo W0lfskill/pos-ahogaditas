@@ -7,7 +7,7 @@
 (() => {
 'use strict';
 const CFG = window.POS_CONFIG || {};
-const VERSION = '1.3.1';
+const VERSION = '1.4.0';
 
 /* ================= utilidades ================= */
 const $ = s => document.querySelector(s);
@@ -28,7 +28,8 @@ const CATS = ['Paquetes','Especialidades','Tacos','Bebidas','Postres','Extras'];
 const ACCION = {cancelar_producto:'Canceló producto', cancelar_orden:'Canceló orden', descuento:'Descuento', corte_caja:'Corte de caja',
   bloqueo_pin:'Bloqueo por PIN', cambio_precio:'Cambio de precio', cambio_producto:'Cambio de producto', alta_producto:'Alta de producto',
   alta_personal:'Alta de personal', cambio_personal:'Cambio de personal', desbloquear:'Desbloqueo', cambio_ajuste:'Cambio de ajuste',
-  anular_venta_cobrada:'Anuló venta cobrada', borrar_demo:'Borró datos demo'};
+  anular_venta_cobrada:'Anuló venta cobrada', borrar_demo:'Borró datos demo',
+  uso_2fa:'Usó código de verificación', codigo_2fa_fallido:'Código de verificación incorrecto', activar_2fa:'Activó verificación en dos pasos', quitar_2fa:'Quitó verificación en dos pasos'};
 function etiquetaOrden(o){ return o.tipo === 'mesa' ? `Mesa ${o.mesa}` : o.tipo === 'llevar' ? `Llevar${o.cliente ? ' · ' + o.cliente : ''}` : CANAL[o.tipo]; }
 
 const store = {
@@ -165,9 +166,18 @@ function bloquear(){
       const r = await rpc('pos_login', {p_clave: S.clave, p_staff: S.ses.staff.id, p_pin: pin}).catch(e => e);
       if (r instanceof ApiError && r.code === 'RED'){ return desbloqueoLocal(pin); }
       if (r instanceof ApiError){ $('#lmsg').textContent = r.message; return false; }
+      const listo = r2 => { const viejo = S.ses.token; S.ses.token = r2.token; rpc('pos_logout', {p_token: viejo}).catch(() => {}); quitaLock(); };
+      if (!r.ok && r.requiere_codigo){
+        pideCodigo(el, S.ses.staff.nombre, async cod => {
+          const r2 = await rpc('pos_login', {p_clave: S.clave, p_staff: S.ses.staff.id, p_pin: pin, p_codigo: cod}).catch(e => e);
+          if (r2 instanceof ApiError) return r2.message;
+          if (!r2.ok) return r2.error;
+          listo(r2); return true;
+        }, () => { quitaLock(); cerrarSesion(); });
+        return true;
+      }
       if (!r.ok){ $('#lmsg').textContent = r.error; return false; }
-      const viejo = S.ses.token; S.ses.token = r.token; rpc('pos_logout', {p_token: viejo}).catch(() => {});
-      quitaLock(); return true;
+      listo(r); return true;
     }
     return desbloqueoLocal(pin);
   });
@@ -240,22 +250,45 @@ async function vLogin(sel){
   padPin($('#pad'), $('#dots'), async pin => {
     const r = await rpc('pos_login', {p_clave: S.clave, p_staff: sel.id, p_pin: pin}).catch(e => e);
     if (r instanceof ApiError){ $('#pmsg').textContent = r.message; return false; }
+    const entra = async r2 => {
+      const salt = uuid();
+      S.ses = {token: r2.token, staff: r2.staff, config: r2.config, salt, pinHash: await sha256(salt + pin)};
+      S.vista = 'inicio'; tocar();
+      await cargaMenu(); render(); sincroniza();
+    };
+    if (!r.ok && r.requiere_codigo){
+      pideCodigo($('#lg'), sel.nombre, async cod => {
+        const r2 = await rpc('pos_login', {p_clave: S.clave, p_staff: sel.id, p_pin: pin, p_codigo: cod}).catch(e => e);
+        if (r2 instanceof ApiError) return r2.message;
+        if (!r2.ok) return r2.error;
+        await entra(r2); return true;
+      }, () => vLogin());
+      return true;
+    }
     if (!r.ok){ $('#pmsg').textContent = r.error; return false; }
-    const salt = uuid();
-    S.ses = {token: r.token, staff: r.staff, config: r.config, salt, pinHash: await sha256(salt + pin)};
-    S.vista = 'inicio'; tocar();
-    await cargaMenu(); render(); sincroniza();
-    return true;
+    await entra(r); return true;
   });
 }
-function padPin(pad, dots, onOk){
+// Segundo paso: código de 6 dígitos del autenticador (Google Authenticator)
+function pideCodigo(cont, nombre, onCode, onBack){
+  cont.innerHTML = `<div class="pinbox" id="t2"><h1>${esc(nombre)}</h1><p class="muted">Verificación en dos pasos: escribe el código de 6 dígitos que ves en Google Authenticator</p>
+    <div class="dots" id="tdots"></div><div class="pad" id="tpad"></div><div class="msg" id="tmsg"></div>
+    <button class="btn ghost block" id="tback" style="margin-top:12px">← Volver</button></div>`;
+  $('#tback').onclick = onBack;
+  padPin($('#tpad'), $('#tdots'), async cod => {
+    const r = await onCode(cod);
+    if (r === true) return true;
+    const m = $('#tmsg'); if (m) m.textContent = r || 'Código incorrecto.'; return false;
+  }, 6);
+}
+function padPin(pad, dots, onOk, min = 4){
   let pin = '', busy = false; const MAX = 6;
-  const draw = () => dots.innerHTML = Array.from({length: Math.max(4, pin.length)}, (_, i) => `<i class="${i < pin.length ? 'on' : ''}"></i>`).join('');
+  const draw = () => dots.innerHTML = Array.from({length: Math.max(min, pin.length)}, (_, i) => `<i class="${i < pin.length ? 'on' : ''}"></i>`).join('');
   pad.innerHTML = [1,2,3,4,5,6,7,8,9].map(n => `<button data-k="${n}">${n}</button>`).join('') + `<button class="fn" data-k="del">Borrar</button><button data-k="0">0</button><button class="fn" data-k="ok" style="color:var(--accent);font-weight:800">Entrar</button>`;
   const press = async k => {
     if (busy) return;
     if (k === 'del') pin = pin.slice(0, -1);
-    else if (k === 'ok'){ if (pin.length < 4) return; busy = true; const ok = await onOk(pin); busy = false; if (!ok){ pin = ''; } }
+    else if (k === 'ok'){ if (pin.length < min) return; busy = true; const ok = await onOk(pin); busy = false; if (!ok){ pin = ''; } }
     else if (pin.length < MAX) pin += k;
     draw();
   };
@@ -291,19 +324,21 @@ function vInicio(){
   const r = rol(); const lista = Object.values(S.ordenes).sort((a, b) => String(a.abierta_en).localeCompare(String(b.abierta_en)));
   const mias = lista.filter(o => r === 'mesero' || o.mesero_id === S.ses.staff.id || o.pendiente);
   const otras = r === 'mesero' ? [] : lista.filter(o => !mias.includes(o));
-  const card = o => { const t = totales(o); return `<button class="card order" data-open="${esc(o.id)}">
+  const card = o => { const t = totales(o); return `<div class="ordwrap"><button class="card order" data-open="${esc(o.id)}">
       <div class="row"><span class="tag ${o.tipo === 'mesa' ? 't-mesa' : o.tipo === 'llevar' ? 't-llevar' : 't-app'}">${esc(CANAL[o.tipo])}</span>${o.pendiente ? '<span class="tag pend">Por enviar</span>' : ''}<span class="spacer"></span><span class="muted small">${o.folio ? 'Folio ' + o.folio : ''}</span></div>
-      <b>${esc(etiquetaOrden(o))}</b><div class="row"><span class="t num">${money(t.total)}</span><span class="spacer"></span><span class="muted small">${minsAgo(o.abierta_en)} min${otras.length || r !== 'mesero' ? ' · ' + esc(o.mesero || '') : ''}</span></div></button>`; };
+      <b>${esc(etiquetaOrden(o))}</b><div class="row"><span class="t num">${money(t.total)}</span><span class="spacer"></span><span class="muted small">${minsAgo(o.abierta_en)} min${otras.length || r !== 'mesero' ? ' · ' + esc(o.mesero || '') : ''}</span></div></button>
+      ${o.pendiente ? '' : `<button class="btn cx" data-cxo="${esc(o.id)}">Cancelar orden</button>`}</div>`; };
   const errs = r !== 'mesero' && S.errores.length ? `<div class="banner crit">${S.errores.length} operación(es) hechas sin internet no se registraron. <button class="btn sm" data-act="verErrores">Ver</button></div>` : '';
   app().innerHTML = barra() + `<main>${errs}
     <div class="row" style="margin-bottom:14px"><button class="btn pri big" data-act="nueva" style="flex:1;min-width:220px">+ Nueva orden</button>
-      ${r !== 'mesero' ? '<button class="btn big" data-act="rutina">Apertura y cierre</button><button class="btn big" data-act="corte">Corte de caja</button>' : ''}${r === 'admin' ? '<button class="btn big" data-act="admin">Panel</button>' : ''}</div>
+      ${r !== 'mesero' ? '<button class="btn big" data-act="rutina">Apertura y cierre</button><button class="btn big" data-act="corte">Corte de caja</button><button class="btn big" data-act="anular">Anular venta cobrada</button>' : ''}${r === 'admin' ? '<button class="btn big" data-act="admin">Panel</button>' : ''}</div>
     <h3>${r === 'mesero' ? 'Mis órdenes abiertas' : 'Mis órdenes'}</h3>
     ${mias.length ? `<div class="grid cards">${mias.map(card).join('')}</div>` : '<div class="empty">No tienes órdenes abiertas.</div>'}
     ${r !== 'mesero' ? `<h3>Órdenes abiertas de los demás</h3>${otras.length ? `<div class="grid cards">${otras.map(card).join('')}</div>` : '<div class="empty">Ninguna.</div>'}` : ''}
     ${S.menu?.ajuste_confirmado === false && Object.values(S.menu?.ajuste_plataforma || {}).every(v => !v) ? '<p class="note">Precios de Rappi / DiDi / Uber: por confirmar (hoy se cobra igual que en local).</p>' : ''}
   </main>`;
   app().querySelectorAll('[data-open]').forEach(b => b.onclick = () => abreOrden(b.dataset.open));
+  app().querySelectorAll('[data-cxo]').forEach(b => b.onclick = () => cancelarOrden(b.dataset.cxo));
 }
 function abreOrden(id){ const o = S.ordenes[id]; if (!o) return; S.o = {...o, items: [...(o.items || [])], nuevos: []}; S.cat = CATS[0]; S.vista = 'orden'; render(); }
 
@@ -366,8 +401,9 @@ function vOrden(){
         <div class="tot"><span>Total</span><b class="num">${money(t.total)}</b></div>
         <button class="btn pri big" data-act="guardar" ${o.nuevos.length ? '' : 'disabled'}>Guardar orden${o.nuevos.length ? ` (${o.nuevos.reduce((a, n) => a + n.cantidad, 0)} nuevo${o.nuevos.length > 1 ? 's' : ''})` : ''}</button>
         <div class="row"><button class="btn ok big" data-act="cobrar" style="flex:1" ${lineas.some(l => l.estado !== 'cancelado') ? '' : 'disabled'}>Cobrar</button>
-          ${!o.nueva ? `<button class="btn big" data-act="desc" title="Descuento (requiere autorización)">%</button><button class="btn big" data-act="cancelOrden" title="Cancelar orden">✕</button>` : ''}</div>
-        <div class="row">${lineas.some(l => l.estado !== 'cancelado') ? `<button class="btn" data-act="cuenta" style="flex:1">Ver cuenta</button>` : ''}${!o.nueva && o.tipo === 'mesa' && !o.pendiente ? `<button class="btn" data-act="mover" style="flex:1">⇄ Cambiar o unir mesa</button>` : ''}</div></div>
+          ${!o.nueva ? `<button class="btn big" data-act="desc" title="Descuento (requiere autorización)">%</button>` : ''}</div>
+        <div class="row">${lineas.some(l => l.estado !== 'cancelado') ? `<button class="btn" data-act="cuenta" style="flex:1">Ver cuenta</button>` : ''}${!o.nueva && o.tipo === 'mesa' && !o.pendiente ? `<button class="btn" data-act="mover" style="flex:1">⇄ Cambiar o unir mesa</button>` : ''}</div>
+        ${!o.nueva && !o.pendiente ? '<button class="btn big cx" data-act="cancelOrden">Cancelar orden</button>' : ''}</div>
     </aside></div></main>`;
   app().querySelectorAll('[data-cat]').forEach(b => b.onclick = () => { S.cat = b.dataset.cat; vOrden(); pintaSync(); });
   app().querySelectorAll('[data-prod]').forEach(b => b.onclick = () => tocaProducto(b.dataset.prod));
@@ -602,22 +638,31 @@ function moverMesa(){
 }
 
 /* ---------- autorizaciones (encargada / admin) ---------- */
-function hojaAutoriza(titulo, detalle, motivos, extraHTML, onOk, onDraw){
-  if (!S.online){ toast('Para autorizar se necesita internet.', true); return; }
-  const aut = S.personal.filter(p => p.rol !== 'mesero' && p.es_demo === esDemo());
-  let quien = aut.find(p => p.id === S.ses.staff.id)?.id || (aut.length === 1 ? aut[0].id : null); let motivo = ''; let pin = '';
+// opts.cancela: pide código del autenticador (cancelar producto / orden / anular venta)
+// opts.anular: anular venta cobrada (autoriza el admin, o la encargada solo con autenticador)
+async function hojaAutoriza(titulo, detalle, motivos, extraHTML, onOk, onDraw, opts = {}){
+  if (!S.online){ toast(opts.cancela ? 'Para cancelar se necesita internet.' : 'Para autorizar se necesita internet.', true); return; }
+  if (opts.cancela){ try { S.personal = await rpc('pos_personal', {p_clave: S.clave}); } catch(e){ if (e.code === 'RED') return toast('Para cancelar se necesita internet.', true); } }
+  const obliga = !!S.ses.config?.cancelar_requiere_2fa;
+  const aut = S.personal.filter(p => p.rol !== 'mesero' && p.es_demo === esDemo()
+    && (!opts.cancela || !obliga || p.dos_pasos) && (!opts.anular || p.rol === 'admin' || p.dos_pasos));
+  if (!aut.length) return toast(obliga ? 'Nadie tiene la verificación en dos pasos activa: no se puede autorizar. Pide al administrador que la active.' : 'No hay quién pueda autorizar.', true);
+  let quien = aut.find(p => p.id === S.ses.staff.id)?.id || (aut.length === 1 ? aut[0].id : null); let motivo = ''; let pin = ''; let cod = ''; let pideCod = false;
+  const conCodigo = () => opts.cancela && (pideCod || !!aut.find(p => p.id === quien)?.dos_pasos);
   const draw = (msg) => {
     abreModal(`<div class="sheet"><h2 style="margin:0">${esc(titulo)}</h2><p class="muted" style="margin:0">${esc(detalle)}</p>${(typeof extraHTML === 'function' ? extraHTML() : extraHTML) || ''}
       <div class="grp"><div class="gt">Motivo <span class="muted small">obligatorio</span></div><div class="chips">${motivos.map(m => `<button class="chip" data-mot="${esc(m)}" aria-pressed="${motivo === m}">${esc(m)}</button>`).join('')}</div>
         <input id="motl" style="margin-top:8px;font:17px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg);width:100%" maxlength="100" placeholder="Otro motivo…" value="${esc(motivos.includes(motivo) ? '' : motivo)}"></div>
       <div class="grp"><div class="gt">Autoriza</div><div class="opts">${aut.map(p => `<button class="opt" data-aut="${esc(p.id)}" aria-pressed="${quien === p.id}">${esc(p.nombre)}</button>`).join('')}</div>
-        <label class="field" style="margin-top:10px">PIN de quien autoriza<input id="apin" type="password" inputmode="numeric" maxlength="6" autocomplete="off" value="${esc(pin)}"></label></div>
+        <label class="field" style="margin-top:10px">PIN de quien autoriza<input id="apin" type="password" inputmode="numeric" maxlength="6" autocomplete="off" value="${esc(pin)}"></label>
+        ${conCodigo() ? `<label class="field" style="margin-top:10px">Código de 6 dígitos de su autenticador<input id="acod" class="big num" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000" value="${esc(cod)}"></label>` : ''}</div>
+      ${opts.cancela ? '<p class="note" style="margin:0">Se cancela y queda registrada en la bitácora: quién, cuándo, motivo e importe. Sale de las ventas y del corte.</p>' : ''}
       <div class="msg">${esc(msg || '')}</div>
       <div class="foot"><button class="btn big" data-x="no">Volver</button><button class="btn pri big" data-x="si">Autorizar</button></div></div>`);
     const d = dlg();
-    const keep = () => { pin = $('#apin').value; if ($('#motl').value.trim()) motivo = $('#motl').value.trim(); };
+    const keep = () => { pin = $('#apin').value; cod = $('#acod')?.value.trim() || ''; if ($('#motl').value.trim()) motivo = $('#motl').value.trim(); };
     d.querySelectorAll('[data-mot]').forEach(b => b.onclick = () => { keep(); motivo = b.dataset.mot; $('#motl').value = ''; draw(); });
-    d.querySelectorAll('[data-aut]').forEach(b => b.onclick = () => { keep(); quien = b.dataset.aut; draw(); });
+    d.querySelectorAll('[data-aut]').forEach(b => b.onclick = () => { keep(); quien = b.dataset.aut; cod = ''; pideCod = false; draw(); });
     d.querySelector('[data-x="no"]').onclick = cierraModal;
     if (onDraw) onDraw(d);
     d.querySelector('[data-x="si"]').onclick = async () => {
@@ -625,8 +670,10 @@ function hojaAutoriza(titulo, detalle, motivos, extraHTML, onOk, onDraw){
       if (mot.length < 3) return draw('Elige o escribe el motivo.');
       if (!quien) return draw('Elige quién autoriza.');
       if (pin.length < 4) return draw('Escribe el PIN.');
-      try { const r = await onOk(quien, pin, mot, d); if (r && r.ok === false){ pin = ''; motivo = mot; return draw(r.error); } cierraModal(); }
-      catch(e){ pin = ''; motivo = mot; draw(e.message); }
+      if (conCodigo() && !/^[0-9]{6}$/.test(cod)) return draw('Escribe el código de 6 dígitos del autenticador.');
+      try { const r = await onOk(quien, pin, mot, d, conCodigo() ? cod : null);
+        if (r && r.ok === false){ pin = ''; cod = ''; motivo = mot; if (r.requiere_codigo) pideCod = true; return draw(r.error); } cierraModal(); }
+      catch(e){ pin = ''; cod = ''; motivo = mot; draw(e.code === 'RED' && opts.cancela ? 'Para cancelar se necesita internet.' : e.message); }
     };
   };
   draw();
@@ -635,11 +682,11 @@ function cancelarItem(itemId){
   const i = S.o.items.find(x => x.id === itemId); let n = i.cantidad;
   const extra = () => i.cantidad > 1 ? `<div class="grp"><div class="gt">¿Cuántos cancelar? <span class="muted small">de ${i.cantidad}</span></div><div class="stepper"><button data-cq="-1">−</button><output class="num" id="cqv">${n}</output><button data-cq="1">+</button></div></div>` : '';
   hojaAutoriza('Cancelar producto', `${i.cantidad}× ${i.nombre}${i.variante ? ' (' + i.variante + ')' : ''} · ${money(i.cantidad * i.precio_unit)}`,
-    ['Error de captura', 'Cliente cambió', 'Se acabó', 'Tardó mucho'], extra, async (quien, pin, mot) => {
-      const r = await call('pos_cancelar_item', {p_item: itemId, p_autoriza: quien, p_pin: pin, p_motivo: mot, p_cantidad: n});
-      if (r.ok){ S.ordenes[S.o.id] = r.orden; S.o = {...r.orden, items: [...r.orden.items], nuevos: S.o.nuevos}; toast(n < i.cantidad ? `${n} cancelado(s)` : 'Producto cancelado'); vOrden(); pintaSync(); }
+    ['Error de captura', 'Cliente cambió', 'Se acabó', 'Tardó mucho'], extra, async (quien, pin, mot, d, cod) => {
+      const r = await call('pos_cancelar_item', {p_item: itemId, p_autoriza: quien, p_pin: pin, p_motivo: mot, p_cantidad: n, p_codigo: cod});
+      if (r.ok){ S.ordenes[S.o.id] = r.orden; S.o = {...r.orden, items: [...r.orden.items], nuevos: S.o.nuevos}; toast(n < i.cantidad ? `${n} cancelado(s) y registrado(s)` : 'Producto cancelado y registrado'); vOrden(); pintaSync(); }
       return r;
-    }, d => d.querySelectorAll('[data-cq]').forEach(b => b.onclick = () => { n = Math.max(1, Math.min(i.cantidad, n + Number(b.dataset.cq))); $('#cqv').textContent = n; }));
+    }, d => d.querySelectorAll('[data-cq]').forEach(b => b.onclick = () => { n = Math.max(1, Math.min(i.cantidad, n + Number(b.dataset.cq))); $('#cqv').textContent = n; }), {cancela: true});
 }
 function descuento(){
   const t = totales(S.o);
@@ -655,13 +702,29 @@ function descuento(){
   const bind = () => dlg().querySelectorAll('[data-dt]').forEach(b => { b.setAttribute('aria-pressed', b.dataset.dt === dt); b.onclick = () => { dt = b.dataset.dt; bind(); }; });
   bind();
 }
-function cancelarOrden(){
-  const t = totales(S.o);
-  hojaAutoriza('Cancelar orden completa', `${etiquetaOrden(S.o)} · ${money(t.total)}`, ['Cliente se fue', 'Orden duplicada', 'Error de captura'], '', async (quien, pin, mot) => {
-    const r = await call('pos_cancelar_orden', {p_orden: S.o.id, p_autoriza: quien, p_pin: pin, p_motivo: mot});
-    if (r.ok){ delete S.ordenes[S.o.id]; if (S.o.tipo === 'mesa') S.mesasOcupadas = S.mesasOcupadas.filter(m => m !== S.o.mesa); S.o = null; S.vista = 'inicio'; toast('Orden cancelada'); render(); }
+function cancelarOrden(id){
+  const o = id ? S.ordenes[id] : S.o; if (!o) return;
+  if (o.pendiente) return toast('Esta orden todavía no se envía. Para cancelar se necesita internet.', true);
+  const t = totales(o);
+  hojaAutoriza('Cancelar orden', `${etiquetaOrden(o)}${o.folio ? ' · Folio ' + o.folio : ''} · ${money(t.total)}`, ['Cliente se fue', 'Orden duplicada', 'Error de captura'], '', async (quien, pin, mot, d, cod) => {
+    const r = await call('pos_cancelar_orden', {p_orden: o.id, p_autoriza: quien, p_pin: pin, p_motivo: mot, p_codigo: cod});
+    if (r.ok){ delete S.ordenes[o.id]; if (o.tipo === 'mesa') S.mesasOcupadas = S.mesasOcupadas.filter(m => m !== o.mesa);
+      if (S.o?.id === o.id){ S.o = null; S.vista = 'inicio'; } toast('Orden cancelada y registrada'); render(); }
     return r;
-  });
+  }, null, {cancela: true});
+}
+// Anular una venta YA cobrada (encargada con su código, o el administrador)
+function anularVenta(fecha, folio, despues){
+  let fol = folio ? String(folio) : '';
+  const extra = () => `<div class="grp"><div class="gt">Folio de la venta <span class="muted small">${fecha === hoyISO() ? 'de hoy' : fdate(fecha)}</span></div>
+    <input id="afol" class="big num" inputmode="numeric" maxlength="6" placeholder="Folio" value="${esc(fol)}" style="font:22px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg);width:100%"></div>`;
+  hojaAutoriza('Anular venta cobrada', 'La venta ya se cobró. Sin autenticador, solo el administrador puede anularla.', ['Error de cobro', 'Devolución al cliente', 'Venta duplicada'], extra,
+    async (quien, pin, mot, d, cod) => {
+      const n = Number(fol); if (!(n > 0)) return {ok: false, error: 'Escribe el folio.'};
+      const r = await call('admin_anular_venta', {p_fecha: fecha, p_folio: n, p_motivo: mot, p_autoriza: quien, p_pin: pin, p_codigo: cod});
+      if (r.ok){ toast(`Venta folio ${n} anulada y registrada`); if (despues) despues(); }
+      return r;
+    }, d => { const f = d.querySelector('#afol'); f.oninput = () => { fol = f.value.replace(/\D/g, ''); }; }, {cancela: true, anular: true});
 }
 
 /* ---------- corte de caja ---------- */
@@ -778,12 +841,9 @@ async function aResumen(){
       <div><h3>Por canal</h3>${tabla([['Canal', x => CANAL[x.canal] || x.canal], ['Órdenes', x => x.ordenes, 'n'], ['Ventas', x => money(x.ventas), 'n']], r.por_canal)}</div>
       <div><h3>Propinas · ${money(r.propinas || 0)}</h3>${tabla([['Mesero', x => esc(x.mesero)], ['Propinas', x => money(x.propinas), 'n']], r.propinas_por_mesero || [], 'Sin propinas registradas.')}<p class="note">Las propinas no se suman a las ventas.</p></div></div>
     <h3>¿Cuándo vendes más?</h3>${cuandoVendes(r)}
-    <h3>Anular una venta ya cobrada</h3><div class="card row"><input type="date" id="anf" class="cell w" value="${hoyISO()}"><input id="anfo" class="cell" inputmode="numeric" placeholder="Folio"><input id="anm" class="cell w" style="width:240px" placeholder="Motivo"><button class="btn" id="anb">Anular venta</button>
-      <span class="note" style="margin:0">Queda en la bitácora. Si ya entró a un corte, la diferencia se verá en ese corte.</span></div>`;
-  $('#anb').onclick = async () => {
-    try { await call('admin_anular_venta', {p_fecha: $('#anf').value, p_folio: Number($('#anfo').value), p_motivo: $('#anm').value}); toast('Venta anulada'); S.admin.rep = null; aResumen(); }
-    catch(e){ toast(e.message, true); }
-  };
+    <h3>Anular una venta ya cobrada</h3><div class="card row"><input type="date" id="anf" class="cell w" value="${hoyISO()}"><input id="anfo" class="cell" inputmode="numeric" placeholder="Folio"><button class="btn cx" id="anb">Anular venta…</button>
+      <span class="note" style="margin:0">Pide motivo, PIN y código. Se cancela y queda en la bitácora. Si ya entró a un corte, la diferencia se verá en ese corte.</span></div>`;
+  $('#anb').onclick = () => anularVenta($('#anf').value || hoyISO(), $('#anfo').value, () => { S.admin.rep = null; if (S.vista === 'admin' && S.admin.tab === 'resumen') aResumen(); });
 }
 const DSEM = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
 function cuandoVendes(r){
@@ -910,7 +970,9 @@ async function aAjustes(){
       <button class="btn pri" id="sv6">Guardar</button></div>
     <div class="card grid"><h2>Respaldo</h2><p class="muted" style="margin:0">Descarga toda la información (ventas, cortes, inventario, recetas, personal sin PIN) en un archivo. Hazlo cada semana y guárdalo en tu computadora o en la nube.</p>
       <p style="margin:0">Último respaldo: <b>${c.ultimo_respaldo ? ftime(c.ultimo_respaldo) : 'nunca'}</b></p>
-      <button class="btn pri" id="bresp">Descargar respaldo</button></div></div>`;
+      <button class="btn pri" id="bresp">Descargar respaldo</button></div>
+    <div class="card grid" id="c2fa" style="grid-column:1/-1"><h2>Verificación en dos pasos</h2><p class="muted">Cargando…</p></div></div>`;
+  pinta2FA();
   const g = (k, v) => call('admin_config_guardar', {p_clave: k, p_valor: v});
   const ok = async f => { try { await f(); toast('Guardado'); } catch(e){ toast(e.message, true); } };
   $('#sv1').onclick = () => ok(async () => { await g('mesas', Number($('#cm').value)); await g('fondo_caja', Number($('#cf').value)); await g('inactividad_min', Number($('#ci').value)); await g('max_intentos', Number($('#cx').value)); await g('bloqueo_min', Number($('#cb').value)); S.ses.config.mesas = Number($('#cm').value); S.ses.config.inactividad_min = Number($('#ci').value); });
@@ -922,6 +984,61 @@ async function aAjustes(){
   $('#sv5').onclick = () => ok(async () => { await g('comision_apps', {rappi: Number($('#co_rappi').value) || 0, didi: Number($('#co_didi').value) || 0, uber: Number($('#co_uber').value) || 0});
     await g('comision_tarjeta', Number($('#co_t').value) || 0); await g('comision_apps_confirmada', $('#co_ok').checked); await g('iva_en_resultado', $('#co_iva').checked); });
   $('#sv6').onclick = () => ok(async () => { const sp = id => $(id).value.split('\n').map(x => x.trim()).filter(Boolean).slice(0, 15); await g('rutina_items', {apertura: sp('#ra'), cierre: sp('#rc')}); });
+}
+/* ---------- verificación en dos pasos (Google Authenticator) ---------- */
+async function pinta2FA(){
+  const box = $('#c2fa'); if (!box) return;
+  let d; try { d = await call('admin_2fa_estado'); } catch(e){ box.innerHTML = `<h2>Verificación en dos pasos</h2><div class="banner crit">${esc(e.message)}</div>`; return; }
+  const req = d.requiere === true;
+  box.innerHTML = `<h2>Verificación en dos pasos</h2>
+    <p class="muted" style="margin:0">Con Google Authenticator en el celular. Para entrar al panel (tú) y para autorizar cancelaciones se pide, además del PIN, el código de 6 dígitos que cambia cada 30 segundos.</p>
+    ${d.personas.map(p => `<div class="payrow" style="align-items:center"><span><b>${esc(p.nombre)}</b> <span class="muted small">${p.rol === 'admin' ? 'administrador' : 'encargada'}</span><br>
+        ${p.activo ? `<span class="small" style="color:var(--ok)">✔ Activa desde ${ftime(p.activado)}</span>` : '<span class="small muted">No activa</span>'}</span>
+      ${p.activo ? `<button class="btn cx" data-2q="${esc(p.id)}" data-yo="${p.yo ? 1 : ''}">Quitar</button>` : `<button class="btn pri" data-2a="${esc(p.id)}">Activar</button>`}</div>`).join('')}
+    <div id="c2paso"></div>
+    <label class="row"><input type="checkbox" id="c2req" ${req ? 'checked' : ''} style="width:22px;height:22px"> Las cancelaciones requieren código (nadie autoriza sin autenticador)</label>
+    <p class="note" style="margin:0">Apagado: el código se pide solo a quien ya lo tiene activo. Si alguien pierde el celular: “Quitar” aquí, o en Supabase &gt; SQL Editor: <code>select pos.quitar_2fa('Nombre');</code></p>`;
+  $('#c2req').onchange = async e => {
+    try { await call('admin_config_guardar', {p_clave: 'cancelar_requiere_2fa', p_valor: e.target.checked}); S.ses.config.cancelar_requiere_2fa = e.target.checked; toast('Guardado'); }
+    catch(err){ e.target.checked = !e.target.checked; toast(err.message, true); }
+  };
+  box.querySelectorAll('[data-2a]').forEach(b => b.onclick = () => activar2FA(b.getAttribute('data-2a')));
+  box.querySelectorAll('[data-2q]').forEach(b => b.onclick = () => quitar2FA(d.personas.find(p => p.id === b.getAttribute('data-2q'))));
+}
+async function activar2FA(id){
+  let r; try { r = await call('admin_2fa_iniciar', {p_staff: id}); } catch(e){ return toast(e.message, true); }
+  // El secreto solo vive en esta pantalla mientras se escanea; no se guarda en la tablet.
+  const emisor = r.emisor || 'Ahogaditas Tapatio';
+  const uri = `otpauth://totp/${encodeURIComponent(emisor)}:${encodeURIComponent(r.nombre)}?secret=${r.secreto}&issuer=${encodeURIComponent(emisor)}&algorithm=SHA1&digits=6&period=30`;
+  let svg = ''; try { const q = qrcode(0, 'M'); q.addData(uri); q.make(); svg = q.createSvgTag({cellSize: 5, margin: 2, scalable: true}); } catch(e){}
+  const paso = $('#c2paso');
+  paso.innerHTML = `<div class="card grid" style="border:2px solid var(--accent)"><h3 style="margin:0">Activar para ${esc(r.nombre)}</h3>
+    <ol style="margin:0;padding-left:20px;line-height:1.5"><li>En el celular de ${esc(r.nombre)} abre <b>Google Authenticator</b> y toca <b>+</b> → <b>Escanear un código QR</b>.</li>
+      <li>Escanea este código. Si no se puede, elige “Ingresar una clave de configuración” y escribe la clave de abajo.</li>
+      <li>Escribe aquí el código de 6 dígitos que aparece en el celular.</li></ol>
+    <div class="qr"><div class="img">${svg}</div><div><div class="muted small">Clave (cuenta: ${esc(r.nombre)})</div><div class="clave2fa">${esc(r.secreto.match(/.{1,4}/g).join(' '))}</div></div></div>
+    <label class="field">Código de 6 dígitos<input id="c2cod" class="big num" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000"></label>
+    <div class="row"><button class="btn big" id="c2no">Cancelar</button><button class="btn pri big" id="c2ok" style="flex:1">Confirmar y activar</button></div></div>`;
+  $('#c2no').onclick = () => { paso.innerHTML = ''; };
+  $('#c2ok').onclick = async () => {
+    const c = $('#c2cod').value.trim(); if (!/^[0-9]{6}$/.test(c)) return toast('Escribe los 6 dígitos.', true);
+    try { await call('admin_2fa_confirmar', {p_staff: id, p_codigo: c}); toast(`Verificación activada para ${r.nombre}`); pinta2FA(); }
+    catch(e){ toast(e.message, true); }
+  };
+  paso.scrollIntoView({block: 'nearest'});
+}
+function quitar2FA(p){
+  abreModal(`<div class="sheet"><h2 style="margin:0">Quitar verificación de ${esc(p.nombre)}</h2>
+    <p class="muted">Úsalo si cambió o perdió el celular. Después vuelve a activarla con el celular nuevo.</p>
+    ${p.yo ? '<label class="field">Tu código actual de 6 dígitos<input id="q2cod" class="big num" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></label>' : ''}
+    <div class="msg" id="q2msg"></div><div class="foot"><button class="btn big" data-x="no">Volver</button><button class="btn big cx" data-x="si">Quitar</button></div></div>`);
+  const d = dlg(); d.querySelector('[data-x="no"]').onclick = cierraModal;
+  d.querySelector('[data-x="si"]').onclick = async () => {
+    try { const r = await call('admin_2fa_quitar', {p_staff: p.id, p_codigo: p.yo ? $('#q2cod').value.trim() : null});
+      if (r.ok === false){ $('#q2msg').textContent = r.error; return; }
+      cierraModal(); toast('Verificación quitada'); pinta2FA(); }
+    catch(e){ $('#q2msg').textContent = e.message; }
+  };
 }
 async function respaldo(){
   try { const r = await call('admin_respaldo'); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(r)], {type: 'application/json'}));
@@ -1376,6 +1493,7 @@ document.addEventListener('click', async e => {
   if (a === 'cobrar') return cobrar();
   if (a === 'desc') return descuento();
   if (a === 'cancelOrden') return cancelarOrden();
+  if (a === 'anular') return anularVenta(hoyISO());
   if (a === 'cuenta') return preCuenta();
   if (a === 'mover') return moverMesa();
   if (a === 'corte'){ S.vista = 'corte'; return render(); }
