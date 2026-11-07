@@ -7,7 +7,7 @@
 (() => {
 'use strict';
 const CFG = window.POS_CONFIG || {};
-const VERSION = '1.5.0';
+const VERSION = '1.5.1';
 
 /* ================= utilidades ================= */
 const $ = s => document.querySelector(s);
@@ -59,7 +59,9 @@ const S = {
   errores: store.get('errores', []),
   online: navigator.onLine,
   admin: {tab:'resumen', desde:null, hasta:null, demo:false, rep:null, bit:null, per:null, prods:null, cfg:null},
+  cer: nuevoCer(),      // "Cobradas hoy" de la pantalla principal
 };
+function nuevoCer(){ return {abierta: false, q: '', fecha: null, d: null, ts: 0, cargando: false, err: null}; }
 const esDemo = () => !!S.ses?.staff?.es_demo;
 const rol = () => S.ses?.staff?.rol;
 
@@ -193,7 +195,7 @@ async function desbloqueoLocal(pin){
 function quitaLock(){ locked = false; $('#lock')?.remove(); tocar(); render(); }
 async function cerrarSesion(msg){
   const t = S.ses?.token; S.ses = null; S.o = null; S.ordenes = {}; S.vista = 'inicio';
-  S.admin = {tab:'resumen', desde:null, hasta:null, demo:false};
+  S.admin = {tab:'resumen', desde:null, hasta:null, demo:false}; S.cer = nuevoCer();
   clearTimeout(idleT); $('#lock')?.remove(); locked = false; cierraModal();
   if (t) rpc('pos_logout', {p_token: t}).catch(() => {});
   render(); if (msg) toast(msg, true);
@@ -331,6 +333,7 @@ function vInicio(){
       <div class="row"><span class="tag ${o.tipo === 'mesa' ? 't-mesa' : o.tipo === 'llevar' ? 't-llevar' : 't-app'}">${esc(CANAL[o.tipo])}</span>${o.pendiente ? '<span class="tag pend">Por enviar</span>' : ''}<span class="spacer"></span>${folioHTML(o)}</div>
       <b>${esc(etiquetaOrden(o))}</b><div class="row"><span class="t num">${money(t.total)}</span><span class="spacer"></span><span class="muted small">${minsAgo(o.abierta_en)} min${otras.length || r !== 'mesero' ? ' · ' + esc(o.mesero || '') : ''}</span></div></button>
       ${o.pendiente ? '' : `<button class="btn cx" data-cxo="${esc(o.id)}">Cancelar orden</button>`}</div>`; };
+  const foco = document.activeElement?.id === 'cerq' ? document.activeElement.selectionStart : null;
   const errs = r !== 'mesero' && S.errores.length ? `<div class="banner crit">${S.errores.length} operación(es) hechas sin internet no se registraron. <button class="btn sm" data-act="verErrores">Ver</button></div>` : '';
   app().innerHTML = barra() + `<main>${errs}
     <div class="row" style="margin-bottom:14px"><button class="btn pri big" data-act="nueva" style="flex:1;min-width:220px">+ Nueva orden</button>
@@ -338,10 +341,98 @@ function vInicio(){
     <h3>${r === 'mesero' ? 'Mis órdenes abiertas' : 'Mis órdenes'}</h3>
     ${mias.length ? `<div class="grid cards">${mias.map(card).join('')}</div>` : '<div class="empty">No tienes órdenes abiertas.</div>'}
     ${r !== 'mesero' ? `<h3>Órdenes abiertas de los demás</h3>${otras.length ? `<div class="grid cards">${otras.map(card).join('')}</div>` : '<div class="empty">Ninguna.</div>'}` : ''}
+    ${seccionCerradas()}
     ${S.menu?.ajuste_confirmado === false && Object.values(S.menu?.ajuste_plataforma || {}).every(v => !v) ? '<p class="note">Precios de Rappi / DiDi / Uber: por confirmar (hoy se cobra igual que en local).</p>' : ''}
   </main>`;
   app().querySelectorAll('[data-open]').forEach(b => b.onclick = () => abreOrden(b.dataset.open));
   app().querySelectorAll('[data-cxo]').forEach(b => b.onclick = () => cancelarOrden(b.dataset.cxo));
+  montaCerradas();
+  if (foco != null){ const q = $('#cerq'); if (q){ q.focus(); try { q.setSelectionRange(foco, foco); } catch(e){} } }
+}
+
+/* ---------- cobradas hoy (pantalla principal) ----------
+ * El servidor decide qué se ve: el mesero solo SUS órdenes de hoy (sin total del día),
+ * la encargada todas las de hoy y el admin cualquier fecha. */
+const horaCorta = t => t ? new Date(t).toLocaleTimeString('es-MX', {hour: '2-digit', minute: '2-digit'}) : '';
+const tituloCer = d => !d || d.fecha === d.hoy ? 'Cobradas hoy' : 'Cobradas del ' + fdate(d.fecha);
+function seccionCerradas(){
+  const C = S.cer, d = C.d;
+  return `<details class="cerradas" id="cer" ${C.abierta ? 'open' : ''}><summary><span id="certit">${esc(tituloCer(d))}</span> <span class="num" id="cern">(${d ? d.cobradas : '…'})</span></summary>
+    <div class="cerbar"><input id="cerq" class="cell cerq" type="search" inputmode="numeric" autocomplete="off" placeholder="Buscar folio o mesa" value="${esc(C.q)}" aria-label="Buscar por folio o número de mesa">
+      ${rol() === 'admin' ? `<label class="row small cerf">Fecha <input type="date" id="cerf" class="cell w" max="${hoyISO()}" value="${esc(C.fecha || hoyISO())}"></label>` : ''}</div>
+    <p class="muted small" id="cerres" style="margin:8px 14px"></p><div id="cerlist"></div></details>`;
+}
+function montaCerradas(){
+  const det = $('#cer'); if (!det) return;
+  det.ontoggle = () => { S.cer.abierta = det.open; if (det.open) cargaCerradas(); };
+  const q = $('#cerq'); q.oninput = () => { S.cer.q = q.value; pintaCerradas(); };
+  const f = $('#cerf'); if (f) f.onchange = () => { S.cer.fecha = f.value || hoyISO(); S.cer.d = null; pintaCerradas(); cargaCerradas(true); };
+  pintaCerradas();
+  if (!S.cer.d || Date.now() - S.cer.ts > 15000) cargaCerradas();
+}
+async function cargaCerradas(forzar){
+  const C = S.cer; if (!S.ses || C.cargando) return;
+  if (!forzar && C.d && Date.now() - C.ts < 5000) return;
+  C.cargando = true; const pedida = C.fecha;
+  try { const d = await call('pos_ordenes_cerradas', rol() === 'admin' && C.fecha ? {p_fecha: C.fecha} : {});
+    if (S.cer === C && pedida === C.fecha){ C.d = d; C.ts = Date.now(); C.err = null; } }
+  catch(e){ if (S.cer === C) C.err = e.code === 'RED' ? 'Sin internet: no se pudo actualizar la lista.' : e.message; }
+  finally { C.cargando = false; }
+  if (S.cer !== C) return;                       // cambió de usuario mientras cargaba
+  if (pedida !== C.fecha) return cargaCerradas(true);  // cambió la fecha mientras cargaba
+  if (S.vista === 'inicio') pintaCerradas();
+}
+// Número → folio o número de mesa. Texto → nombre del cliente o número de pedido. (Igual que el servidor.)
+function coincideCer(o, q){
+  if (/^\d+$/.test(q)) return String(o.folio) === String(Number(q)) || (o.tipo === 'mesa' && String(o.mesa) === String(Number(q)));
+  return String(o.cliente || '').toLowerCase().includes(q.toLowerCase());
+}
+function tarjetaCerrada(o){
+  const cx = o.estado === 'cancelada';
+  const mets = (o.metodos || []).map(m => METODO[m] || m).join(' + ');
+  return `<button class="card cerrada ${cx ? 'cx' : ''}" data-cer="${esc(o.id)}">
+    <div class="row"><span class="tag ${cx ? 'est-cancelada' : 'est-cobrada'}">${cx ? 'Cancelada' : 'Cobrada'}</span><span class="spacer"></span>${folioHTML(o)}</div>
+    <b class="cl">${esc(lugarOrden(o))}</b>
+    <div class="row"><span class="t num">${cx ? `<s>${money(o.total)}</s>` : money(o.total)}</span><span class="spacer"></span><span class="muted small">${horaCorta(cx ? o.cancelada_en : o.cobrada_en)}</span></div>
+    <span class="muted small">${esc(o.mesero || '')}${!cx && mets ? ' · ' + esc(mets) : ''}</span>
+    ${cx ? `<span class="small cxm">Motivo: ${esc(o.cancel_motivo || '—')}</span>` : ''}</button>`;
+}
+function pintaCerradas(){
+  const C = S.cer, d = C.d, el = $('#cerlist'); if (!el) return;
+  $('#certit').textContent = tituloCer(d); $('#cern').textContent = d ? `(${d.cobradas})` : '(…)';
+  const res = $('#cerres');
+  if (!d){ res.textContent = ''; el.innerHTML = C.err ? `<div class="banner">${esc(C.err)}</div>` : '<p class="muted">Cargando…</p>'; return; }
+  const q = C.q.trim().replace(/^#/, '');
+  const filas = q ? d.ordenes.filter(o => coincideCer(o, q)) : d.ordenes;
+  res.innerHTML = `${d.cobradas} cobrada${d.cobradas === 1 ? '' : 's'}${d.canceladas ? ` · ${d.canceladas} cancelada${d.canceladas === 1 ? '' : 's'} (no suman)` : ''}${d.total != null ? ` · Total cobrado <b class="num">${money(d.total)}</b>` : ''}${C.err ? ` · <span style="color:var(--warn)">${esc(C.err)}</span>` : ''}`;
+  el.innerHTML = filas.length ? `<div class="grid cards">${filas.map(tarjetaCerrada).join('')}</div>`
+    : `<div class="empty">${q ? `No encontré el folio o la mesa “${esc(q)}”${d.fecha === d.hoy ? ' hoy' : ' en esa fecha'}.` : d.fecha === d.hoy ? 'Todavía no hay órdenes cobradas hoy.' : 'No hay órdenes cobradas en esa fecha.'}</div>`;
+  el.querySelectorAll('[data-cer]').forEach(b => b.onclick = () => detalleCerrada(b.dataset.cer));
+}
+// Detalle en solo lectura de una orden cobrada o cancelada
+async function detalleCerrada(id){
+  const fila = S.cer.d?.ordenes.find(x => x.id === id) || {};
+  let o; try { o = (await call('pos_orden', {p_orden: id})).orden; } catch(e){ return toast(e.message, true); }
+  o = {...o, cobrada_en: fila.cobrada_en, cancelada_en: fila.cancelada_en, cancel_motivo: fila.cancel_motivo, cancelada_por: fila.cancelada_por};
+  const cx = o.estado === 'cancelada';
+  const activos = o.items.filter(i => i.estado !== 'cancelado'), quitados = o.items.filter(i => i.estado === 'cancelado');
+  const linea = i => `<div class="payrow"><span>${i.cantidad}× ${esc(i.nombre)}${i.variante ? `<br><span class="muted small">${esc(i.variante)}</span>` : ''}${i.nota ? `<br><span class="small" style="color:var(--warn)">Nota: ${esc(i.nota)}</span>` : ''}${i.estado === 'cancelado' ? `<br><span class="small" style="color:var(--crit)">Cancelado: ${esc(i.cancel_motivo || '')}</span>` : ''}</span><span class="num">${i.estado === 'cancelado' ? `<s>${money(i.importe)}</s>` : money(i.importe)}</span></div>`;
+  const pago = p => `<div class="payrow"><span>${esc(METODO[p.metodo] || p.metodo)}${p.recibido ? ` · recibió ${money(p.recibido)}` : ''}${Number(p.cambio) > 0 ? ` · cambio ${money(p.cambio)}` : ''}${Number(p.propina) > 0 ? ` · propina ${money(p.propina)}` : ''}</span><span class="num">${money(p.monto)}</span></div>`;
+  abreModal(`<div class="sheet cerdet"><div class="row"><h2 style="margin:0">Orden <span class="foliobig sm">#${esc(o.folio)}</span></h2><span class="spacer"></span><button class="btn sm" data-x="no">Cerrar</button></div>
+    <p class="muted" style="margin:0">${esc(lugarOrden(o))} · ${esc(o.mesero || '')} · ${cx ? 'cancelada' : 'cobrada'} ${(cx ? o.cancelada_en : o.cobrada_en) ? ftime(cx ? o.cancelada_en : o.cobrada_en) : ''} <span class="tag est-${esc(o.estado)}">${esc(ESTADO[o.estado] || o.estado)}</span></p>
+    ${cx ? `<div class="banner crit" style="margin:0">Orden cancelada${o.cancelada_por ? ' · autorizó ' + esc(o.cancelada_por) : ''}. Motivo: ${esc(o.cancel_motivo || '—')}. No suma a las ventas.</div>` : ''}
+    <h3 style="margin:4px 0 0">Productos</h3>${activos.length ? `<div class="paylist">${activos.map(linea).join('')}</div>` : '<p class="muted" style="margin:0">Sin productos.</p>'}
+    ${quitados.length ? `<h3 style="margin:4px 0 0">Productos cancelados</h3><div class="paylist">${quitados.map(linea).join('')}</div>` : ''}
+    ${Number(o.descuento) > 0 ? `<div class="tot"><span class="muted">Subtotal</span><span class="num">${money(o.subtotal)}</span></div>
+      <div class="tot"><span class="muted">Descuento${o.descuento_tipo === 'pct' ? ' ' + esc(o.descuento_valor) + ' %' : ''}${o.descuento_motivo ? ' · ' + esc(o.descuento_motivo) : ''}</span><span class="num">−${money(o.descuento)}</span></div>` : ''}
+    <div class="tot"><span>Total</span><b class="num">${cx ? `<s>${money(o.total)}</s>` : money(o.total)}</b></div>
+    <h3 style="margin:4px 0 0">Pagos</h3>${o.pagos?.length ? `<div class="paylist">${o.pagos.map(pago).join('')}</div>` : '<p class="muted" style="margin:0">Sin pagos.</p>'}
+    ${Number(o.propina) > 0 ? `<div class="tot"><span class="muted">Propina</span><span class="num">${money(o.propina)}</span></div>` : ''}
+    ${cx ? '' : `<div class="foot"><button class="btn big" data-x="tk">Reimprimir ticket</button>${rol() === 'admin' ? '<button class="btn big cx" data-x="anu">Anular venta cobrada</button>' : ''}</div>`}</div>`);
+  const d = dlg();
+  d.querySelector('[data-x="no"]').onclick = cierraModal;
+  const tk = d.querySelector('[data-x="tk"]'); if (tk) tk.onclick = () => imprimeTicket({...o, reimpresion: true}, true);
+  const an = d.querySelector('[data-x="anu"]'); if (an) an.onclick = () => anularVenta(o.fecha, o.folio, () => { S.admin.od = S.admin.rep = null; cargaCerradas(true); });
 }
 function abreOrden(id, desde){ const o = S.ordenes[id]; if (!o) return; S.o = {...o, items: [...(o.items || [])], nuevos: [], desde}; S.cat = CATS[0]; S.vista = 'orden'; render(); }
 
@@ -489,15 +580,15 @@ async function guardar(volver){
 }
 function postGuardar(ord, volver, offline, nueva){
   if (offline) toast('Guardada en la tablet. El folio se asigna cuando vuelva el internet.');
-  else if (!(nueva && volver && ord.folio)) toast(`Orden guardada${ord.folio ? ' · folio #' + ord.folio : ''}`);
+  else if (!(nueva && volver && ord.folio)) toast(ord.folio ? `Orden #${ord.folio} guardada` : 'Orden guardada');
   if (volver){ S.o = null; S.vista = 'inicio'; render(); if (nueva && !offline && ord.folio) avisoFolio(ord); }
   else { S.o = {...ord, items: [...ord.items], nuevos: []}; }
 }
 // Aviso grande con el folio de una orden nueva, para anotarlo en la comanda de papel
 function avisoFolio(o){
   abreModal(`<div class="sheet folioaviso"><p class="muted" style="margin:0">${esc(etiquetaOrden(o))}</p>
-    <h2 style="margin:0">Orden <span class="foliobig">#${esc(o.folio)}</span></h2>
-    <p class="anota">Anota este número en la comanda de papel.</p>
+    <h2 style="margin:0">Orden <span class="foliobig">#${esc(o.folio)}</span> guardada</h2>
+    <p class="anota">Anota el número en la comanda.</p>
     <div class="foot"><button class="btn pri big" data-x="ok">Listo, ya lo anoté</button></div></div>`);
   dlg().querySelector('[data-x="ok"]').onclick = cierraModal;
 }
@@ -578,7 +669,7 @@ async function enviaCobro(o, pagos){
   const propina = r2(pagos.reduce((a, p) => a + (p.propina || 0), 0));
   const params = {p_orden: o.id, p_pagos: pagos};
   const fin = (offline, ord) => {
-    delete S.ordenes[o.id]; if (o.tipo === 'mesa') S.mesasOcupadas = S.mesasOcupadas.filter(m => m !== o.mesa);
+    delete S.ordenes[o.id]; if (o.tipo === 'mesa') S.mesasOcupadas = S.mesasOcupadas.filter(m => m !== o.mesa); S.cer.ts = 0;
     const tk = ord || {...o, items: [...(o.items || [])], pagos, propina, total: totales(o).total, subtotal: totales(o).sub, descuento: totales(o).desc, estado: 'cobrada'};
     abreModal(`<div class="sheet" style="text-align:center"><h2>Cobrado ✓</h2><p class="muted">${(ord || o).folio ? `Orden #${esc((ord || o).folio)} · ` : ''}${esc(etiquetaOrden(o))}${offline ? ' · se registrará al volver el internet' : ''}</p>
       ${cambio > 0 ? `<div class="cambio">Cambio a entregar<b class="num">${money(cambio)}</b></div>` : ''}${propina > 0 ? `<p class="muted">Propina registrada: <b>${money(propina)}</b></p>` : ''}
@@ -596,10 +687,10 @@ function ticketTexto(o, pagado){
   const cfg = S.ses.config || {}; const t = o.subtotal != null ? {sub: o.subtotal, desc: o.descuento, total: o.total} : totales(o);
   const L = []; const W = 32; const pad = (a, b) => { a = String(a); b = String(b); return a.length + b.length + 1 > W ? a + '\n' + ' '.repeat(Math.max(0, W - b.length)) + b : a + ' '.repeat(W - a.length - b.length) + b; };
   String(cfg.ticket_encabezado || 'Ahogaditas Tapatío').split('\n').forEach(x => L.push(x));
-  L.push('-'.repeat(W)); L.push(pagado ? 'TICKET' : 'CUENTA (no es comprobante de pago)');
+  L.push('-'.repeat(W)); L.push(pagado ? (o.reimpresion ? 'TICKET (REIMPRESIÓN)' : 'TICKET') : 'CUENTA (no es comprobante de pago)');
   if (o.folio){ const f = `FOLIO #${o.folio}`; L.push(' '.repeat(Math.max(0, Math.floor((W - f.length - 8) / 2))) + `*** ${f} ***`); }
   L.push(etiquetaOrden(o));
-  L.push(new Date().toLocaleString('es-MX', {dateStyle: 'short', timeStyle: 'short'}) + (o.mesero ? ' · ' + o.mesero : '')); L.push('-'.repeat(W));
+  L.push(new Date(o.cobrada_en || Date.now()).toLocaleString('es-MX', {dateStyle: 'short', timeStyle: 'short'}) + (o.mesero ? ' · ' + o.mesero : '')); L.push('-'.repeat(W));
   (o.items || []).filter(i => i.estado !== 'cancelado').concat(o.nuevos || []).forEach(i => { L.push(pad(`${i.cantidad} ${i.nombre}`, money(i.cantidad * i.precio_unit))); if (i.variante) L.push('  ' + i.variante); });
   L.push('-'.repeat(W));
   if (t.desc) { L.push(pad('Subtotal', money(t.sub))); L.push(pad('Descuento', '-' + money(t.desc))); }
@@ -741,7 +832,7 @@ function cancelarOrden(id){
   const t = totales(o);
   hojaAutoriza('Cancelar orden', `${o.folio ? 'Orden #' + o.folio + ' · ' : ''}${etiquetaOrden(o)} · ${money(t.total)}`, ['Cliente se fue', 'Orden duplicada', 'Error de captura'], '', async (quien, pin, mot, d, cod, tel) => {
     const r = await call('pos_cancelar_orden', {p_orden: o.id, p_autoriza: quien, p_pin: pin, p_motivo: mot, p_codigo: cod, p_telefono: !!tel});
-    if (r.ok){ delete S.ordenes[o.id]; if (o.tipo === 'mesa') S.mesasOcupadas = S.mesasOcupadas.filter(m => m !== o.mesa);
+    if (r.ok){ delete S.ordenes[o.id]; if (o.tipo === 'mesa') S.mesasOcupadas = S.mesasOcupadas.filter(m => m !== o.mesa); S.cer.ts = 0;
       if (S.o?.id === o.id){ S.o = null; S.vista = 'inicio'; } toast('Orden cancelada y registrada'); render(); }
     return r;
   }, null, {cancela: true});
