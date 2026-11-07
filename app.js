@@ -7,7 +7,7 @@
 (() => {
 'use strict';
 const CFG = window.POS_CONFIG || {};
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 
 /* ================= utilidades ================= */
 const $ = s => document.querySelector(s);
@@ -30,6 +30,8 @@ const ACCION = {cancelar_producto:'Canceló producto', cancelar_orden:'Canceló 
   alta_personal:'Alta de personal', cambio_personal:'Cambio de personal', desbloquear:'Desbloqueo', cambio_ajuste:'Cambio de ajuste',
   anular_venta_cobrada:'Anuló venta cobrada', borrar_demo:'Borró datos demo',
   uso_2fa:'Usó código de verificación', codigo_2fa_fallido:'Código de verificación incorrecto', activar_2fa:'Activó verificación en dos pasos', quitar_2fa:'Quitó verificación en dos pasos'};
+const folioTxt = o => o.folio ? '#' + o.folio : '';
+const folioHTML = (o, cls = '') => `<span class="folio ${cls}"><small>Folio</small>${o.folio ? '#' + esc(o.folio) : '<i>por asignar</i>'}</span>`;
 function etiquetaOrden(o){ return o.tipo === 'mesa' ? `Mesa ${o.mesa}` : o.tipo === 'llevar' ? `Llevar${o.cliente ? ' · ' + o.cliente : ''}` : CANAL[o.tipo]; }
 
 const store = {
@@ -95,7 +97,8 @@ async function sincroniza(){
   try {
     for (const it of [...S.cola]){
       if (it.staff !== S.ses.staff.id) continue;
-      try { await rpc(it.fn, {p_token: S.ses.token, ...it.params}); S.cola = S.cola.filter(x => x.id !== it.id); guardaCola(); }
+      try { const r = await rpc(it.fn, {p_token: S.ses.token, ...it.params}); S.cola = S.cola.filter(x => x.id !== it.id); guardaCola();
+        if (it.fn === 'pos_guardar_orden' && r?.orden?.folio && !S.ordenes[r.orden.id]?.folio){ S.ordenes[r.orden.id] = {...r.orden}; toast(`Ya hay internet: ${etiquetaOrden(r.orden)} es la orden #${r.orden.folio}. Anótalo en la comanda.`); } }
       catch(e){
         if (e.code === 'RED') break;
         if (e.code === 'SESION') break;
@@ -159,8 +162,8 @@ function bloquear(){
     <button class="btn ghost block" id="lswitch" style="margin-top:12px">Cambiar de usuario</button></div>`;
   document.body.appendChild(el);
   // Datos de administración fuera de la memoria mientras está bloqueado
-  S.admin.rep = S.admin.bit = S.admin.per = S.admin.prods = S.admin.cfg = S.admin.inv = null;
-  if (S.vista === 'admin' || S.vista === 'corte') S.vista = 'inicio';
+  S.admin.rep = S.admin.bit = S.admin.per = S.admin.prods = S.admin.cfg = S.admin.inv = S.admin.od = null;
+  if (S.vista === 'admin' || S.vista === 'corte' || S.vista === 'mapa') S.vista = 'inicio';
   padPin($('#lpad'), $('#ldots'), async pin => {
     if (S.online){
       const r = await rpc('pos_login', {p_clave: S.clave, p_staff: S.ses.staff.id, p_pin: pin}).catch(e => e);
@@ -209,7 +212,7 @@ function render(){
   if (!CFG.API_URL) return vSinConfig();
   if (!S.clave) return vClave();
   if (!S.ses) return vLogin();
-  const v = {inicio: vInicio, tipo: vTipo, orden: vOrden, corte: vCorte, admin: vAdmin, rutina: vRutina}[S.vista] || vInicio;
+  const v = {inicio: vInicio, tipo: vTipo, orden: vOrden, corte: vCorte, admin: vAdmin, rutina: vRutina, mapa: vMapa}[S.vista] || vInicio;
   v(); pintaSync();
 }
 function vSinConfig(){
@@ -325,13 +328,13 @@ function vInicio(){
   const mias = lista.filter(o => r === 'mesero' || o.mesero_id === S.ses.staff.id || o.pendiente);
   const otras = r === 'mesero' ? [] : lista.filter(o => !mias.includes(o));
   const card = o => { const t = totales(o); return `<div class="ordwrap"><button class="card order" data-open="${esc(o.id)}">
-      <div class="row"><span class="tag ${o.tipo === 'mesa' ? 't-mesa' : o.tipo === 'llevar' ? 't-llevar' : 't-app'}">${esc(CANAL[o.tipo])}</span>${o.pendiente ? '<span class="tag pend">Por enviar</span>' : ''}<span class="spacer"></span><span class="muted small">${o.folio ? 'Folio ' + o.folio : ''}</span></div>
+      <div class="row"><span class="tag ${o.tipo === 'mesa' ? 't-mesa' : o.tipo === 'llevar' ? 't-llevar' : 't-app'}">${esc(CANAL[o.tipo])}</span>${o.pendiente ? '<span class="tag pend">Por enviar</span>' : ''}<span class="spacer"></span>${folioHTML(o)}</div>
       <b>${esc(etiquetaOrden(o))}</b><div class="row"><span class="t num">${money(t.total)}</span><span class="spacer"></span><span class="muted small">${minsAgo(o.abierta_en)} min${otras.length || r !== 'mesero' ? ' · ' + esc(o.mesero || '') : ''}</span></div></button>
       ${o.pendiente ? '' : `<button class="btn cx" data-cxo="${esc(o.id)}">Cancelar orden</button>`}</div>`; };
   const errs = r !== 'mesero' && S.errores.length ? `<div class="banner crit">${S.errores.length} operación(es) hechas sin internet no se registraron. <button class="btn sm" data-act="verErrores">Ver</button></div>` : '';
   app().innerHTML = barra() + `<main>${errs}
     <div class="row" style="margin-bottom:14px"><button class="btn pri big" data-act="nueva" style="flex:1;min-width:220px">+ Nueva orden</button>
-      ${r !== 'mesero' ? '<button class="btn big" data-act="rutina">Apertura y cierre</button><button class="btn big" data-act="corte">Corte de caja</button><button class="btn big" data-act="anular">Anular venta cobrada</button>' : ''}${r === 'admin' ? '<button class="btn big" data-act="admin">Panel</button>' : ''}</div>
+      ${r !== 'mesero' ? '<button class="btn big" data-act="rutina">Apertura y cierre</button><button class="btn big" data-act="corte">Corte de caja</button>' : ''}${r === 'admin' ? '<button class="btn big" data-act="mapa">Mapa del restaurante</button><button class="btn big" data-act="anular">Anular venta cobrada</button><button class="btn big" data-act="admin">Panel</button>' : ''}</div>
     <h3>${r === 'mesero' ? 'Mis órdenes abiertas' : 'Mis órdenes'}</h3>
     ${mias.length ? `<div class="grid cards">${mias.map(card).join('')}</div>` : '<div class="empty">No tienes órdenes abiertas.</div>'}
     ${r !== 'mesero' ? `<h3>Órdenes abiertas de los demás</h3>${otras.length ? `<div class="grid cards">${otras.map(card).join('')}</div>` : '<div class="empty">Ninguna.</div>'}` : ''}
@@ -340,7 +343,7 @@ function vInicio(){
   app().querySelectorAll('[data-open]').forEach(b => b.onclick = () => abreOrden(b.dataset.open));
   app().querySelectorAll('[data-cxo]').forEach(b => b.onclick = () => cancelarOrden(b.dataset.cxo));
 }
-function abreOrden(id){ const o = S.ordenes[id]; if (!o) return; S.o = {...o, items: [...(o.items || [])], nuevos: []}; S.cat = CATS[0]; S.vista = 'orden'; render(); }
+function abreOrden(id, desde){ const o = S.ordenes[id]; if (!o) return; S.o = {...o, items: [...(o.items || [])], nuevos: [], desde}; S.cat = CATS[0]; S.vista = 'orden'; render(); }
 
 /* ---------- tipo de orden ---------- */
 let tipoSel = 'mesa';
@@ -386,12 +389,12 @@ function vOrden(){
   const lineas = [...o.items.map(i => ({...i, srv: true})), ...o.nuevos.map(i => ({...i, nuevo: true}))];
   app().innerHTML = barra() + `<main><div class="posgrid">
     <section><div class="row" style="margin-bottom:10px"><button class="btn" data-act="inicio">← Órdenes</button>
-      <h2 style="margin:0">${esc(etiquetaOrden(o))}</h2><span class="muted">${o.folio ? 'Folio ' + o.folio : o.nueva ? 'Orden nueva' : ''}</span></div>
+      <h2 style="margin:0">${esc(etiquetaOrden(o))}</h2>${o.nueva ? '<span class="muted">Orden nueva</span>' : folioHTML(o, 'big')}</div>
       <div class="cats">${cats.map(c => `<button class="cat" data-cat="${esc(c)}" aria-pressed="${c === S.cat}">${esc(c)}</button>`).join('')}</div>
       <div class="grid prods">${prods.filter(p => p.categoria === S.cat).map(p => { const q = enCarrito(p.id); const precio = rangoPrecio(p, o.tipo);
         return `<button class="prod" data-prod="${esc(p.id)}"><b>${esc(p.nombre)}</b><span class="p">${precio}</span>${p.grupos?.length ? '<span class="v">elegir</span>' : ''}${q ? `<span class="q">${q}</span>` : ''}</button>`; }).join('')}</div>
     </section>
-    <aside class="ticket"><div class="hd row"><b>${esc(etiquetaOrden(o))}</b><span class="spacer"></span><span class="muted small">${lineas.filter(l => l.estado !== 'cancelado').length} producto(s)</span></div>
+    <aside class="ticket"><div class="hd row"><b>${o.folio ? `<span class="folio-inline">${folioTxt(o)}</span> ` : ''}${esc(etiquetaOrden(o))}</b><span class="spacer"></span><span class="muted small">${lineas.filter(l => l.estado !== 'cancelado').length} producto(s)</span></div>
       <div class="bd">${lineas.length ? lineas.map(l => `<div class="line ${l.nuevo ? 'new' : ''} ${l.estado === 'cancelado' ? 'cx' : ''}">
           <span class="qty">${l.cantidad}×</span><div><div class="nm">${esc(l.nombre)}</div>${l.variante ? `<div class="vr">${esc(l.variante)}</div>` : ''}${l.nota ? `<div class="nt">${esc(l.nota)}</div>` : ''}${l.estado === 'cancelado' ? `<div class="vr">Cancelado: ${esc(l.cancel_motivo || '')}</div>` : ''}${l.pendiente ? '<div class="vr">por enviar</div>' : ''}</div>
           <div class="act"><span class="num">${money(l.cantidad * l.precio_unit)}</span>
@@ -476,18 +479,27 @@ function payloadOrden(){
 }
 async function guardar(volver){
   const o = S.o; if (!o.nuevos.length) return true;
-  const params = {p_orden: payloadOrden()};
+  const params = {p_orden: payloadOrden()}; const nueva = !!o.nueva;
   if (pendientes() || !S.online){ encola('pos_guardar_orden', params); aplicaLocal(S.cola[S.cola.length - 1]); postGuardar(S.ordenes[o.id], volver, true); return true; }
-  try { const r = await call('pos_guardar_orden', params); S.ordenes[o.id] = r.orden; if (o.tipo === 'mesa' && !S.mesasOcupadas.includes(o.mesa)) S.mesasOcupadas.push(o.mesa); postGuardar(r.orden, volver); return true; }
+  try { const r = await call('pos_guardar_orden', params); S.ordenes[o.id] = r.orden; if (o.tipo === 'mesa' && !S.mesasOcupadas.includes(o.mesa)) S.mesasOcupadas.push(o.mesa); postGuardar(r.orden, volver, false, nueva); return true; }
   catch(e){
     if (e.code === 'RED'){ encola('pos_guardar_orden', params); aplicaLocal(S.cola[S.cola.length - 1]); postGuardar(S.ordenes[o.id], volver, true); return true; }
     toast(e.message, true); if (e.code === 'MENU') cargaMenu(); return false;
   }
 }
-function postGuardar(ord, volver, offline){
-  toast(offline ? 'Guardada en la tablet. Se enviará al volver el internet.' : `Orden guardada${ord.folio ? ' · folio ' + ord.folio : ''}`);
-  if (volver){ S.o = null; S.vista = 'inicio'; render(); }
+function postGuardar(ord, volver, offline, nueva){
+  if (offline) toast('Guardada en la tablet. El folio se asigna cuando vuelva el internet.');
+  else if (!(nueva && volver && ord.folio)) toast(`Orden guardada${ord.folio ? ' · folio #' + ord.folio : ''}`);
+  if (volver){ S.o = null; S.vista = 'inicio'; render(); if (nueva && !offline && ord.folio) avisoFolio(ord); }
   else { S.o = {...ord, items: [...ord.items], nuevos: []}; }
+}
+// Aviso grande con el folio de una orden nueva, para anotarlo en la comanda de papel
+function avisoFolio(o){
+  abreModal(`<div class="sheet folioaviso"><p class="muted" style="margin:0">${esc(etiquetaOrden(o))}</p>
+    <h2 style="margin:0">Orden <span class="foliobig">#${esc(o.folio)}</span></h2>
+    <p class="anota">Anota este número en la comanda de papel.</p>
+    <div class="foot"><button class="btn pri big" data-x="ok">Listo, ya lo anoté</button></div></div>`);
+  dlg().querySelector('[data-x="ok"]').onclick = cierraModal;
 }
 async function cobrar(){
   if (S.o.nuevos.length && !(await guardar(false))) return;
@@ -509,7 +521,7 @@ function hojaCobro(o, t){
   const draw = () => {
     const falta = rest(); const m = monto === '' ? falta : Number(monto); const prop = conProp ? propDe(m) : 0; const rec = recibido === '' ? null : Number(recibido);
     const cambio = metodo === 'efectivo' && rec != null ? r2(rec - m - prop) : 0;
-    abreModal(`<div class="sheet"><div class="row"><h2 style="margin:0">Cobrar · ${esc(etiquetaOrden(o))}</h2><span class="spacer"></span><button class="btn sm" data-x="close">Cerrar</button></div>
+    abreModal(`<div class="sheet"><div class="row"><h2 style="margin:0">Cobrar ${o.folio ? `<span class="folio-inline">${folioTxt(o)}</span> ` : ''}· ${esc(etiquetaOrden(o))}</h2><span class="spacer"></span><button class="btn sm" data-x="close">Cerrar</button></div>
       <div class="paybig num">${money(t.total)}</div>
       ${pagos.length ? `<div class="paylist">${pagos.map((p, i) => `<div class="payrow"><span>${METODO[p.metodo]}${p.propina ? ` · propina ${money(p.propina)}` : ''}${p.recibido ? ` · recibe ${money(p.recibido)}` : ''}</span><span class="num">${money(p.monto)} <button class="btn sm ghost" data-rm="${i}">quitar</button></span></div>`).join('')}
         <div class="payrow" style="background:var(--warn-bg);color:var(--warn)"><span>Falta</span><span class="num">${money(falta)}</span></div></div>` : ''}
@@ -568,7 +580,7 @@ async function enviaCobro(o, pagos){
   const fin = (offline, ord) => {
     delete S.ordenes[o.id]; if (o.tipo === 'mesa') S.mesasOcupadas = S.mesasOcupadas.filter(m => m !== o.mesa);
     const tk = ord || {...o, items: [...(o.items || [])], pagos, propina, total: totales(o).total, subtotal: totales(o).sub, descuento: totales(o).desc, estado: 'cobrada'};
-    abreModal(`<div class="sheet" style="text-align:center"><h2>Cobrado ✓</h2><p class="muted">${esc(etiquetaOrden(o))}${offline ? ' · se registrará al volver el internet' : ''}</p>
+    abreModal(`<div class="sheet" style="text-align:center"><h2>Cobrado ✓</h2><p class="muted">${(ord || o).folio ? `Orden #${esc((ord || o).folio)} · ` : ''}${esc(etiquetaOrden(o))}${offline ? ' · se registrará al volver el internet' : ''}</p>
       ${cambio > 0 ? `<div class="cambio">Cambio a entregar<b class="num">${money(cambio)}</b></div>` : ''}${propina > 0 ? `<p class="muted">Propina registrada: <b>${money(propina)}</b></p>` : ''}
       <div class="foot"><button class="btn big" data-x="tk">Imprimir ticket</button><button class="btn pri big" data-x="ok">Listo</button></div></div>`);
     dlg().querySelector('[data-x="tk"]').onclick = () => imprimeTicket(tk, true);
@@ -584,7 +596,9 @@ function ticketTexto(o, pagado){
   const cfg = S.ses.config || {}; const t = o.subtotal != null ? {sub: o.subtotal, desc: o.descuento, total: o.total} : totales(o);
   const L = []; const W = 32; const pad = (a, b) => { a = String(a); b = String(b); return a.length + b.length + 1 > W ? a + '\n' + ' '.repeat(Math.max(0, W - b.length)) + b : a + ' '.repeat(W - a.length - b.length) + b; };
   String(cfg.ticket_encabezado || 'Ahogaditas Tapatío').split('\n').forEach(x => L.push(x));
-  L.push('-'.repeat(W)); L.push(pagado ? 'TICKET' : 'CUENTA (no es comprobante de pago)'); L.push(`${etiquetaOrden(o)}${o.folio ? ' · Folio ' + o.folio : ''}`);
+  L.push('-'.repeat(W)); L.push(pagado ? 'TICKET' : 'CUENTA (no es comprobante de pago)');
+  if (o.folio){ const f = `FOLIO #${o.folio}`; L.push(' '.repeat(Math.max(0, Math.floor((W - f.length - 8) / 2))) + `*** ${f} ***`); }
+  L.push(etiquetaOrden(o));
   L.push(new Date().toLocaleString('es-MX', {dateStyle: 'short', timeStyle: 'short'}) + (o.mesero ? ' · ' + o.mesero : '')); L.push('-'.repeat(W));
   (o.items || []).filter(i => i.estado !== 'cancelado').concat(o.nuevos || []).forEach(i => { L.push(pad(`${i.cantidad} ${i.nombre}`, money(i.cantidad * i.precio_unit))); if (i.variante) L.push('  ' + i.variante); });
   L.push('-'.repeat(W));
@@ -602,7 +616,7 @@ function imprimeTicket(o, pagado){
 }
 function preCuenta(){
   const o = S.o; const txt = ticketTexto(o, false);
-  abreModal(`<div class="sheet"><div class="row"><h2 style="margin:0">Cuenta · ${esc(etiquetaOrden(o))}</h2><span class="spacer"></span><button class="btn sm" data-x="no">Cerrar</button></div>
+  abreModal(`<div class="sheet"><div class="row"><h2 style="margin:0">Cuenta ${o.folio ? `<span class="folio-inline">${folioTxt(o)}</span> ` : ''}· ${esc(etiquetaOrden(o))}</h2><span class="spacer"></span><button class="btn sm" data-x="no">Cerrar</button></div>
     <pre class="ticketprev">${esc(txt)}</pre>
     ${o.nuevos?.length ? '<div class="banner">Hay productos sin guardar: se incluyen en la cuenta, pero guarda la orden antes de cobrar.</div>' : ''}
     <div class="foot"><button class="btn big" data-x="share">Compartir</button><button class="btn pri big" data-x="print">Imprimir</button></div></div>`);
@@ -637,41 +651,60 @@ function moverMesa(){
   });
 }
 
-/* ---------- autorizaciones (encargada / admin) ---------- */
-// opts.cancela: pide código del autenticador (cancelar producto / orden / anular venta)
-// opts.anular: anular venta cobrada (autoriza el admin, o la encargada solo con autenticador)
+/* ---------- autorizaciones ---------- */
+// Descuentos: autoriza la encargada o el administrador (PIN).
+// opts.cancela (cancelar producto / orden, anular venta): SOLO el administrador,
+//   en persona (PIN + código si tiene autenticador) o por teléfono (solo el código
+//   de su autenticador, que él dicta por llamada). El servidor lo vuelve a validar.
+// opts.anular: anular venta cobrada (solo desde la sesión del admin; sin teléfono).
+const SOLO_ADMIN = 'Solo el administrador puede cancelar. Llama a Guillermo.';
 async function hojaAutoriza(titulo, detalle, motivos, extraHTML, onOk, onDraw, opts = {}){
   if (!S.online){ toast(opts.cancela ? 'Para cancelar se necesita internet.' : 'Para autorizar se necesita internet.', true); return; }
   if (opts.cancela){ try { S.personal = await rpc('pos_personal', {p_clave: S.clave}); } catch(e){ if (e.code === 'RED') return toast('Para cancelar se necesita internet.', true); } }
   const obliga = !!S.ses.config?.cancelar_requiere_2fa;
-  const aut = S.personal.filter(p => p.rol !== 'mesero' && p.es_demo === esDemo()
-    && (!opts.cancela || !obliga || p.dos_pasos) && (!opts.anular || p.rol === 'admin' || p.dos_pasos));
-  if (!aut.length) return toast(obliga ? 'Nadie tiene la verificación en dos pasos activa: no se puede autorizar. Pide al administrador que la active.' : 'No hay quién pueda autorizar.', true);
-  let quien = aut.find(p => p.id === S.ses.staff.id)?.id || (aut.length === 1 ? aut[0].id : null); let motivo = ''; let pin = ''; let cod = ''; let pideCod = false;
-  const conCodigo = () => opts.cancela && (pideCod || !!aut.find(p => p.id === quien)?.dos_pasos);
+  const mismo = p => p.es_demo === esDemo();
+  // opciones: {k, id, nombre, tel, dos_pasos}
+  let aut;
+  if (opts.cancela){
+    const admins = S.personal.filter(p => p.rol === 'admin' && mismo(p));
+    aut = admins.filter(p => !obliga || p.dos_pasos).map(p => ({k: p.id, id: p.id, nombre: p.nombre, tel: false, dos_pasos: p.dos_pasos}));
+    if (!opts.anular) admins.filter(p => p.dos_pasos && p.id !== S.ses.staff.id)
+      .forEach(p => aut.push({k: 'tel:' + p.id, id: p.id, nombre: p.nombre, tel: true, dos_pasos: true}));
+    if (!aut.length) return toast(obliga ? 'El administrador no tiene la verificación en dos pasos activa: no se puede autorizar. ' + SOLO_ADMIN : SOLO_ADMIN, true);
+  } else {
+    aut = S.personal.filter(p => p.rol !== 'mesero' && mismo(p)).map(p => ({k: p.id, id: p.id, nombre: p.nombre, tel: false, dos_pasos: p.dos_pasos}));
+    if (!aut.length) return toast('No hay quién pueda autorizar.', true);
+  }
+  let quien = aut.find(p => p.k === S.ses.staff.id)?.k || (aut.length === 1 ? aut[0].k : null); let motivo = ''; let pin = ''; let cod = ''; let pideCod = false;
+  const sel = () => aut.find(p => p.k === quien);
+  const porTel = () => !!sel()?.tel;
+  const conCodigo = () => opts.cancela && (porTel() || pideCod || !!sel()?.dos_pasos);
   const draw = (msg) => {
+    const t = sel();
     abreModal(`<div class="sheet"><h2 style="margin:0">${esc(titulo)}</h2><p class="muted" style="margin:0">${esc(detalle)}</p>${(typeof extraHTML === 'function' ? extraHTML() : extraHTML) || ''}
       <div class="grp"><div class="gt">Motivo <span class="muted small">obligatorio</span></div><div class="chips">${motivos.map(m => `<button class="chip" data-mot="${esc(m)}" aria-pressed="${motivo === m}">${esc(m)}</button>`).join('')}</div>
         <input id="motl" style="margin-top:8px;font:17px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg);width:100%" maxlength="100" placeholder="Otro motivo…" value="${esc(motivos.includes(motivo) ? '' : motivo)}"></div>
-      <div class="grp"><div class="gt">Autoriza</div><div class="opts">${aut.map(p => `<button class="opt" data-aut="${esc(p.id)}" aria-pressed="${quien === p.id}">${esc(p.nombre)}</button>`).join('')}</div>
-        <label class="field" style="margin-top:10px">PIN de quien autoriza<input id="apin" type="password" inputmode="numeric" maxlength="6" autocomplete="off" value="${esc(pin)}"></label>
-        ${conCodigo() ? `<label class="field" style="margin-top:10px">Código de 6 dígitos de su autenticador<input id="acod" class="big num" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000" value="${esc(cod)}"></label>` : ''}</div>
-      ${opts.cancela ? '<p class="note" style="margin:0">Se cancela y queda registrada en la bitácora: quién, cuándo, motivo e importe. Sale de las ventas y del corte.</p>' : ''}
+      <div class="grp"><div class="gt">Autoriza${opts.cancela ? ' <span class="muted small">solo el administrador</span>' : ''}</div><div class="opts">${aut.map(p => `<button class="opt" data-aut="${esc(p.k)}" aria-pressed="${quien === p.k}">${esc(p.nombre)}${p.tel ? '<small>por teléfono</small>' : ''}</button>`).join('')}</div>
+        ${t?.tel ? `<p class="banner" style="margin:10px 0 0;background:var(--info-bg);color:var(--info)">Llama a ${esc(t.nombre)}. Te va a dictar el código de 6 dígitos de su Google Authenticator. Escríbelo aquí. Quedará registrado que tú lo capturaste.</p>`
+          : `<label class="field" style="margin-top:10px">PIN de quien autoriza<input id="apin" type="password" inputmode="numeric" maxlength="6" autocomplete="off" value="${esc(pin)}"></label>`}
+        ${conCodigo() ? `<label class="field" style="margin-top:10px">${t?.tel ? `Código que te dicta ${esc(t.nombre)}` : 'Código de 6 dígitos de su autenticador'}<input id="acod" class="big num" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000" value="${esc(cod)}"></label>` : ''}</div>
+      ${opts.cancela ? '<p class="note" style="margin:0">Se cancela y queda registrada en la bitácora: quién autorizó, quién capturó, cuándo, motivo e importe. Sale de las ventas y del corte.</p>' : ''}
       <div class="msg">${esc(msg || '')}</div>
       <div class="foot"><button class="btn big" data-x="no">Volver</button><button class="btn pri big" data-x="si">Autorizar</button></div></div>`);
     const d = dlg();
-    const keep = () => { pin = $('#apin').value; cod = $('#acod')?.value.trim() || ''; if ($('#motl').value.trim()) motivo = $('#motl').value.trim(); };
+    const keep = () => { pin = $('#apin')?.value || ''; cod = $('#acod')?.value.trim() || ''; if ($('#motl').value.trim()) motivo = $('#motl').value.trim(); };
     d.querySelectorAll('[data-mot]').forEach(b => b.onclick = () => { keep(); motivo = b.dataset.mot; $('#motl').value = ''; draw(); });
-    d.querySelectorAll('[data-aut]').forEach(b => b.onclick = () => { keep(); quien = b.dataset.aut; cod = ''; pideCod = false; draw(); });
+    d.querySelectorAll('[data-aut]').forEach(b => b.onclick = () => { keep(); quien = b.dataset.aut; cod = ''; pin = ''; pideCod = false; draw(); });
     d.querySelector('[data-x="no"]').onclick = cierraModal;
     if (onDraw) onDraw(d);
     d.querySelector('[data-x="si"]').onclick = async () => {
       keep(); const libre = $('#motl').value.trim(); const mot = libre || motivo;
       if (mot.length < 3) return draw('Elige o escribe el motivo.');
       if (!quien) return draw('Elige quién autoriza.');
-      if (pin.length < 4) return draw('Escribe el PIN.');
-      if (conCodigo() && !/^[0-9]{6}$/.test(cod)) return draw('Escribe el código de 6 dígitos del autenticador.');
-      try { const r = await onOk(quien, pin, mot, d, conCodigo() ? cod : null);
+      const tel = porTel();
+      if (!tel && pin.length < 4) return draw('Escribe el PIN.');
+      if (conCodigo() && !/^[0-9]{6}$/.test(cod)) return draw(tel ? 'Escribe los 6 dígitos que te dicta el administrador.' : 'Escribe el código de 6 dígitos del autenticador.');
+      try { const r = await onOk(sel().id, tel ? null : pin, mot, d, conCodigo() ? cod : null, tel);
         if (r && r.ok === false){ pin = ''; cod = ''; motivo = mot; if (r.requiere_codigo) pideCod = true; return draw(r.error); } cierraModal(); }
       catch(e){ pin = ''; cod = ''; motivo = mot; draw(e.code === 'RED' && opts.cancela ? 'Para cancelar se necesita internet.' : e.message); }
     };
@@ -682,8 +715,8 @@ function cancelarItem(itemId){
   const i = S.o.items.find(x => x.id === itemId); let n = i.cantidad;
   const extra = () => i.cantidad > 1 ? `<div class="grp"><div class="gt">¿Cuántos cancelar? <span class="muted small">de ${i.cantidad}</span></div><div class="stepper"><button data-cq="-1">−</button><output class="num" id="cqv">${n}</output><button data-cq="1">+</button></div></div>` : '';
   hojaAutoriza('Cancelar producto', `${i.cantidad}× ${i.nombre}${i.variante ? ' (' + i.variante + ')' : ''} · ${money(i.cantidad * i.precio_unit)}`,
-    ['Error de captura', 'Cliente cambió', 'Se acabó', 'Tardó mucho'], extra, async (quien, pin, mot, d, cod) => {
-      const r = await call('pos_cancelar_item', {p_item: itemId, p_autoriza: quien, p_pin: pin, p_motivo: mot, p_cantidad: n, p_codigo: cod});
+    ['Error de captura', 'Cliente cambió', 'Se acabó', 'Tardó mucho'], extra, async (quien, pin, mot, d, cod, tel) => {
+      const r = await call('pos_cancelar_item', {p_item: itemId, p_autoriza: quien, p_pin: pin, p_motivo: mot, p_cantidad: n, p_codigo: cod, p_telefono: !!tel});
       if (r.ok){ S.ordenes[S.o.id] = r.orden; S.o = {...r.orden, items: [...r.orden.items], nuevos: S.o.nuevos}; toast(n < i.cantidad ? `${n} cancelado(s) y registrado(s)` : 'Producto cancelado y registrado'); vOrden(); pintaSync(); }
       return r;
     }, d => d.querySelectorAll('[data-cq]').forEach(b => b.onclick = () => { n = Math.max(1, Math.min(i.cantidad, n + Number(b.dataset.cq))); $('#cqv').textContent = n; }), {cancela: true});
@@ -706,19 +739,19 @@ function cancelarOrden(id){
   const o = id ? S.ordenes[id] : S.o; if (!o) return;
   if (o.pendiente) return toast('Esta orden todavía no se envía. Para cancelar se necesita internet.', true);
   const t = totales(o);
-  hojaAutoriza('Cancelar orden', `${etiquetaOrden(o)}${o.folio ? ' · Folio ' + o.folio : ''} · ${money(t.total)}`, ['Cliente se fue', 'Orden duplicada', 'Error de captura'], '', async (quien, pin, mot, d, cod) => {
-    const r = await call('pos_cancelar_orden', {p_orden: o.id, p_autoriza: quien, p_pin: pin, p_motivo: mot, p_codigo: cod});
+  hojaAutoriza('Cancelar orden', `${o.folio ? 'Orden #' + o.folio + ' · ' : ''}${etiquetaOrden(o)} · ${money(t.total)}`, ['Cliente se fue', 'Orden duplicada', 'Error de captura'], '', async (quien, pin, mot, d, cod, tel) => {
+    const r = await call('pos_cancelar_orden', {p_orden: o.id, p_autoriza: quien, p_pin: pin, p_motivo: mot, p_codigo: cod, p_telefono: !!tel});
     if (r.ok){ delete S.ordenes[o.id]; if (o.tipo === 'mesa') S.mesasOcupadas = S.mesasOcupadas.filter(m => m !== o.mesa);
       if (S.o?.id === o.id){ S.o = null; S.vista = 'inicio'; } toast('Orden cancelada y registrada'); render(); }
     return r;
   }, null, {cancela: true});
 }
-// Anular una venta YA cobrada (encargada con su código, o el administrador)
+// Anular una venta YA cobrada (solo el administrador, desde su sesión)
 function anularVenta(fecha, folio, despues){
   let fol = folio ? String(folio) : '';
   const extra = () => `<div class="grp"><div class="gt">Folio de la venta <span class="muted small">${fecha === hoyISO() ? 'de hoy' : fdate(fecha)}</span></div>
     <input id="afol" class="big num" inputmode="numeric" maxlength="6" placeholder="Folio" value="${esc(fol)}" style="font:22px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg);width:100%"></div>`;
-  hojaAutoriza('Anular venta cobrada', 'La venta ya se cobró. Sin autenticador, solo el administrador puede anularla.', ['Error de cobro', 'Devolución al cliente', 'Venta duplicada'], extra,
+  hojaAutoriza('Anular venta cobrada', 'La venta ya se cobró. Solo el administrador puede anularla.', ['Error de cobro', 'Devolución al cliente', 'Venta duplicada'], extra,
     async (quien, pin, mot, d, cod) => {
       const n = Number(fol); if (!(n > 0)) return {ok: false, error: 'Escribe el folio.'};
       const r = await call('admin_anular_venta', {p_fecha: fecha, p_folio: n, p_motivo: mot, p_autoriza: quien, p_pin: pin, p_codigo: cod});
@@ -750,7 +783,8 @@ async function vCorte(){
       <label class="field">Efectivo contado en caja<input id="cont" class="big num" inputmode="decimal" placeholder="0"></label>
       <div class="tot"><span>Diferencia</span><b class="num" id="dif">—</b></div>
       <label class="field">Notas<input id="cnot" maxlength="200"></label>
-      <button class="btn pri big" id="cerrar">Cerrar corte</button></div></div></div>`;
+      <button class="btn pri big" id="cerrar">Cerrar corte</button></div></div></div>
+    ${foliosCorte(d)}`;
   const upd = () => { const f = Number($('#fondo').value) || 0, c = $('#cont').value; const esp = r2(f + d.efectivo + (d.propinas_efectivo || 0)); $('#esp').textContent = money(esp);
     if (c === ''){ $('#dif').textContent = '—'; $('#dif').className = 'num'; return; } const df = r2(Number(c) - esp); $('#dif').textContent = (df > 0 ? '+' : '') + money(df); $('#dif').className = 'num ' + (df < 0 ? 'neg' : df > 0 ? 'pos' : ''); };
   $('#fondo').oninput = upd; $('#cont').oninput = upd; upd();
@@ -761,6 +795,15 @@ async function vCorte(){
     catch(e){ toast(e.message, true); }
   };
 }
+// Folios del turno: cada orden cobrada y cada cancelación, para cuadrar con las comandas de papel
+function foliosCorte(d){
+  const ol = d.ordenes_lista || [], cl = d.cancelaciones_lista || [];
+  const lugar = x => x.tipo === 'mesa' ? `Mesa ${x.mesa}` : (CANAL[x.tipo] || x.tipo) + (x.cliente ? ' · ' + x.cliente : '');
+  return `<div class="two" id="cfolios"><div><h3>Órdenes cobradas en este corte (${ol.length})</h3>${tabla([['Folio', x => `<b class="folio-inline">#${esc(x.folio)}</b>`], ['Mesa o tipo', x => esc(lugar(x))], ['Mesero', x => esc(x.mesero)],
+      ['Pago', x => esc((x.metodos || []).map(m => METODO[m] || m).join(' + '))], ['Total', x => money(x.total), 'n']], ol, 'Todavía no hay órdenes cobradas.')}</div>
+    <div><h3>Cancelaciones (${cl.length})</h3>${tabla([['Folio', x => x.folio != null ? `<b class="folio-inline">#${esc(x.folio)}</b>` : '—'], ['Qué', x => esc(x.accion === 'cancelar_producto' ? (x.producto || 'Producto') : x.accion === 'anular_venta_cobrada' ? 'Venta anulada' : 'Orden completa')],
+      ['Importe', x => money(x.importe), 'n'], ['Autorizó', x => esc(x.autorizo || '') + (x.autorizacion === 'autorizado por teléfono' ? ' <span class="small muted">(por teléfono)</span>' : '')], ['Motivo', x => esc(x.motivo || ''), 'w']], cl, 'Sin cancelaciones.')}</div></div>`;
+}
 function pintaCorteHecho(){
   const c = corteRes; const pm = c.totales?.por_metodo || {};
   $('#cbody').innerHTML = `<div class="card" style="max-width:520px"><h2>Corte cerrado ✓</h2><p class="muted">${ftime(c.creado)} · ${esc(c.hecho_por)}</p>
@@ -768,8 +811,86 @@ function pintaCorteHecho(){
     <tr><td><b>Total</b></td><td class="n"><b>${money(c.totales?.total)}</b></td></tr>${c.totales?.propinas ? `<tr><td>Propinas (no son venta)</td><td class="n">${money(c.totales.propinas)}</td></tr>` : ''}<tr><td>Fondo</td><td class="n">${money(c.fondo)}</td></tr>
     <tr><td>Efectivo esperado</td><td class="n">${money(c.esperado)}</td></tr><tr><td>Efectivo contado</td><td class="n">${money(c.contado)}</td></tr>
     <tr><td><b>Diferencia</b></td><td class="n ${c.diferencia < 0 ? 'neg' : c.diferencia > 0 ? 'pos' : ''}"><b>${money(c.diferencia)}</b></td></tr></tbody></table></div>
-    <div class="row noprint" style="margin-top:12px"><button class="btn" data-act="imprimir">Imprimir</button><button class="btn pri" id="cok">Listo</button></div></div>`;
+    <div class="row noprint" style="margin-top:12px"><button class="btn" data-act="imprimir">Imprimir</button><button class="btn pri" id="cok">Listo</button></div></div>
+    ${foliosCorte(c.totales || {})}`;
   $('#cok').onclick = () => { corteRes = null; S.vista = 'inicio'; render(); };
+}
+
+/* ---------- mapa del restaurante (solo admin) ---------- */
+async function vMapa(){
+  if (rol() !== 'admin'){ S.vista = 'inicio'; return render(); }
+  app().innerHTML = barra() + `<main><div class="row" style="margin-bottom:10px"><button class="btn" data-act="inicio">← Volver</button><h1 style="margin:0">Mapa del restaurante</h1>
+    <span class="spacer"></span><span class="muted small" id="mhora"></span><button class="btn sm" data-act="mapa">Actualizar</button></div><div id="mbody"><p class="muted">Cargando…</p></div></main>`;
+  pintaSync(); await pintaMapa();
+}
+async function pintaMapa(){
+  let d; try { d = await call('admin_mapa'); }
+  catch(e){ const mb = $('#mbody'); if (mb && e.code !== 'RED') mb.innerHTML = `<div class="banner crit">${esc(e.message)}</div>`; return; }
+  const mb = $('#mbody'); if (S.vista !== 'mapa' || !mb) return;
+  d.ordenes.forEach(o => { S.ordenes[o.id] = o; });   // para poder abrirlas
+  const porMesa = {}; d.ordenes.filter(o => o.tipo === 'mesa').forEach(o => { porMesa[o.mesa] = o; });
+  const info = o => `<span class="mm">${esc(o.mesero || '')}</span><span class="mm">${minsAgo(o.abierta_en)} min</span><b class="num mt">${money(o.total)}</b>`;
+  const mesa = m => { const o = porMesa[m];
+    return o ? `<button class="mtile occ" data-mopen="${esc(o.id)}"><span class="mh"><span class="mn">Mesa ${m}</span>${folioHTML(o)}</span>${info(o)}</button>`
+             : `<div class="mtile libre"><span class="mn">Mesa ${m}</span><span class="mm">Libre</span></div>`; };
+  const grupo = (titulo, lista) => `<div class="mgroup"><h3 style="margin-top:0">${titulo} (${lista.length})</h3>${lista.length ? `<div class="grid mapa">${lista.map(o =>
+      `<button class="mtile occ" data-mopen="${esc(o.id)}"><span class="mh"><span class="mn">${esc(etiquetaOrden(o))}</span>${folioHTML(o)}</span>${info(o)}</button>`).join('')}</div>` : '<div class="mtile libre"><span class="mm">Sin órdenes</span></div>'}</div>`;
+  const n = Number(d.mesas) || 10; const ocup = Object.keys(porMesa).length;
+  mb.innerHTML = `<div class="row" style="margin-bottom:10px"><span class="tag t-mesa">${ocup} de ${n} mesas ocupadas</span><span class="tag">${d.ordenes.length} orden(es) abiertas</span><span class="muted small">Se actualiza sola cada 30 segundos.</span></div>
+    <div class="grid mapa">${Array.from({length: n}, (_, i) => mesa(i + 1)).join('')}</div>
+    <div class="two" style="margin-top:16px">${grupo('Para llevar', d.ordenes.filter(o => o.tipo === 'llevar'))}${grupo('Plataformas', d.ordenes.filter(o => ['rappi','didi','uber'].includes(o.tipo)))}</div>`;
+  const h = $('#mhora'); if (h) h.textContent = 'Actualizado ' + new Date().toLocaleTimeString('es-MX', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+  mb.querySelectorAll('[data-mopen]').forEach(b => b.onclick = () => abreOrden(b.dataset.mopen, 'mapa'));
+}
+
+/* ---------- órdenes del día (Panel > Ventas, solo admin) ---------- */
+const ESTADO = {abierta: 'Abierta', cobrada: 'Cobrada', cancelada: 'Cancelada', unida: 'Unida'};
+const lugarOrden = x => x.tipo === 'mesa' ? `Mesa ${x.mesa}` : (CANAL[x.tipo] || x.tipo) + (x.cliente ? ' · ' + x.cliente : '');
+async function ordenesDia(){
+  const A = S.admin; const box = $('#odbox'); if (!box) return;
+  if (!A.odFecha) A.odFecha = hoyISO();
+  box.innerHTML = `<div class="card row" style="margin-bottom:10px"><label class="row small" style="gap:6px">Fecha <input type="date" id="odf" class="cell w" value="${esc(A.odFecha)}"></label>
+      <input id="odq" class="cell" style="width:150px;text-align:left" inputmode="numeric" placeholder="Buscar folio #" value="${esc(A.odQ || '')}" aria-label="Buscar por folio">
+      <span class="muted small" id="odn"></span></div><div id="odlist"><p class="muted">Cargando…</p></div>`;
+  $('#odf').onchange = () => { A.odFecha = $('#odf').value || hoyISO(); A.od = null; ordenesDia(); };
+  $('#odq').oninput = () => { A.odQ = $('#odq').value.replace(/\D/g, ''); pintaOrdenesDia(); };
+  if (!A.od || A.odKey !== A.odFecha + A.demo){
+    try { A.od = await call('admin_ordenes_dia', {p_fecha: A.odFecha, p_demo: A.demo}); A.odKey = A.odFecha + A.demo; }
+    catch(e){ $('#odlist').innerHTML = `<div class="banner crit">${esc(e.message)}</div>`; return; }
+  }
+  pintaOrdenesDia();
+}
+function pintaOrdenesDia(){
+  const A = S.admin; const el = $('#odlist'); if (!el || !A.od) return;
+  const q = A.odQ || ''; const rows = q ? A.od.filter(x => String(x.folio) === q) : A.od;
+  $('#odn').textContent = q ? (rows.length ? '' : `No hay orden #${q} en esa fecha.`) : `${A.od.length} orden(es)`;
+  const hora = t => t ? new Date(t).toLocaleTimeString('es-MX', {hour: '2-digit', minute: '2-digit'}) : '';
+  el.innerHTML = rows.length ? `<div class="tbl"><table><thead><tr><th>Folio</th><th>Hora</th><th>Mesa o tipo</th><th>Mesero</th><th class="n">Total</th><th>Estado</th><th></th></tr></thead><tbody>
+    ${rows.map(x => `<tr class="odrow" data-od="${esc(x.id)}"><td><b class="folio-inline">#${esc(x.folio)}</b></td><td>${hora(x.abierta_en)}</td><td>${esc(lugarOrden(x))}</td><td>${esc(x.mesero)}</td>
+      <td class="n">${money(x.total)}</td><td><span class="tag est-${esc(x.estado)}">${esc(ESTADO[x.estado] || x.estado)}${x.estado === 'unida' && x.unida_a_folio ? ' a #' + esc(x.unida_a_folio) : ''}</span></td>
+      <td><button class="btn sm" data-od="${esc(x.id)}">Ver</button></td></tr>`).join('')}</tbody></table></div>`
+    : `<div class="empty">${q ? `No hay orden #${esc(q)} en esa fecha.` : 'No hay órdenes en esa fecha.'}</div>`;
+  el.querySelectorAll('tr[data-od]').forEach(b => b.onclick = () => detalleOrden(b.dataset.od));
+}
+async function detalleOrden(id){
+  let o; try { o = await call('admin_orden_detalle', {p_orden: id}); } catch(e){ return toast(e.message, true); }
+  const hora = t => t ? ftime(t) : '';
+  const quien = c => `${esc(c.autorizo || '—')}${c.por_telefono ? ' <b>por teléfono</b>' : ''}${c.capturo ? ` · capturó ${esc(c.capturo)}` : ''}`;
+  const activos = o.items.filter(i => i.estado !== 'cancelado');
+  abreModal(`<div class="sheet"><div class="row"><h2 style="margin:0">Orden <span class="foliobig sm">#${esc(o.folio)}</span></h2><span class="spacer"></span><button class="btn sm" data-x="no">Cerrar</button></div>
+    <p class="muted" style="margin:0">${esc(lugarOrden(o))} · ${esc(o.mesero || '')} · abierta ${hora(o.abierta_en)} · <span class="tag est-${esc(o.estado)}">${esc(ESTADO[o.estado] || o.estado)}${o.unida_a_folio ? ' a #' + esc(o.unida_a_folio) : ''}</span></p>
+    <h3 style="margin:4px 0 0">Productos</h3>${activos.length ? `<div class="paylist">${activos.map(i => `<div class="payrow"><span>${i.cantidad}× ${esc(i.nombre)}${i.variante ? ` <span class="muted small">${esc(i.variante)}</span>` : ''}${i.nota ? ` <span class="small" style="color:var(--warn)">${esc(i.nota)}</span>` : ''}</span><span class="num">${money(i.importe)}</span></div>`).join('')}</div>` : '<div class="empty">Sin productos activos.</div>'}
+    <h3 style="margin:4px 0 0">Cancelaciones</h3>${o.cancelaciones.length || o.estado === 'cancelada' ? `<div class="paylist">
+      ${o.cancelaciones.map(c => `<div class="payrow" style="flex-direction:column;gap:2px"><span>${c.cantidad}× ${esc(c.producto)} · <span class="num">${money(c.importe)}</span></span><span class="small muted">Motivo: ${esc(c.motivo || '')} · Autorizó ${quien(c)} · ${hora(c.cuando)}</span></div>`).join('')}
+      ${o.estado === 'cancelada' ? `<div class="payrow" style="flex-direction:column;gap:2px;background:var(--crit-bg);color:var(--crit)"><span>Orden completa cancelada</span><span class="small">Motivo: ${esc(o.cancel_motivo || '')} · Autorizó ${quien({autorizo: o.cancelada_por, por_telefono: o.cancel_telefono, capturo: o.cancel_capturo})} · ${hora(o.cancelada_en)}</span></div>` : ''}</div>` : '<p class="muted" style="margin:0">Ninguna.</p>'}
+    <h3 style="margin:4px 0 0">Descuento</h3>${o.descuento_tipo ? `<div class="payrow"><span>${o.descuento_tipo === 'pct' ? esc(o.descuento_valor) + ' %' : money(o.descuento_valor)} · ${esc(o.descuento_motivo || '')} · autorizó ${esc(o.descuento_autorizo || '')}</span><span class="num">−${money(o.descuento)}</span></div>` : '<p class="muted" style="margin:0">Sin descuento.</p>'}
+    <h3 style="margin:4px 0 0">Pagos</h3>${o.pagos_detalle.length ? `<div class="paylist">${o.pagos_detalle.map(p => `<div class="payrow"><span>${esc(METODO[p.metodo] || p.metodo)}${p.propina > 0 ? ` · propina ${money(p.propina)}` : ''} · ${hora(p.cuando)} · cobró ${esc(p.cobro || '')}</span><span class="num">${money(p.monto)}</span></div>`).join('')}</div>` : '<p class="muted" style="margin:0">Sin pagos.</p>'}
+    <div class="tot"><span>Total</span><b class="num">${money(o.total)}</b></div>
+    <div class="foot"><button class="btn big" data-x="tk">Imprimir ticket</button>${o.estado === 'cobrada' ? '<button class="btn big cx" data-x="anu">Anular esta venta</button>' : ''}</div></div>`);
+  const d = dlg();
+  d.querySelector('[data-x="no"]').onclick = cierraModal;
+  d.querySelector('[data-x="tk"]').onclick = () => imprimeTicket(o, o.estado === 'cobrada');
+  const an = d.querySelector('[data-x="anu"]'); if (an) an.onclick = () => anularVenta(o.fecha, o.folio, () => { S.admin.od = S.admin.rep = null; if (S.vista === 'admin' && S.admin.tab === 'resumen') aResumen(); });
 }
 
 /* ================= ADMINISTRADOR ================= */
@@ -835,6 +956,7 @@ async function aResumen(){
       <div class="kpi"><div class="l">Ticket promedio</div><div class="v num">${money(r.ticket_promedio)}</div></div>
       <div class="kpi"><div class="l">Descuentos</div><div class="v num">${money(r.descuentos)}</div></div>
       <div class="kpi"><div class="l">Canceladas / abiertas</div><div class="v num">${r.canceladas} / ${r.abiertas}</div></div></div>
+    <h3>Órdenes del día</h3><div id="odbox"></div>
     <div class="two"><div><h3>Por día</h3>${r.por_dia.length ? barras(r.por_dia, d => fdate(d.fecha), d => d.ventas) : '<div class="empty">Sin ventas.</div>'}</div>
       <div><h3>Por mesero</h3>${tabla([['Mesero', x => esc(x.mesero)], ['Órdenes', x => x.ordenes, 'n'], ['Ticket', x => money(x.ticket), 'n'], ['Ventas', x => money(x.ventas), 'n']], r.por_mesero)}</div>
       <div><h3>Por forma de pago</h3>${tabla([['Forma', x => METODO[x.metodo] || x.metodo], ['Pagos', x => x.pagos, 'n'], ['Monto', x => money(x.monto), 'n']], r.por_metodo)}</div>
@@ -843,7 +965,8 @@ async function aResumen(){
     <h3>¿Cuándo vendes más?</h3>${cuandoVendes(r)}
     <h3>Anular una venta ya cobrada</h3><div class="card row"><input type="date" id="anf" class="cell w" value="${hoyISO()}"><input id="anfo" class="cell" inputmode="numeric" placeholder="Folio"><button class="btn cx" id="anb">Anular venta…</button>
       <span class="note" style="margin:0">Pide motivo, PIN y código. Se cancela y queda en la bitácora. Si ya entró a un corte, la diferencia se verá en ese corte.</span></div>`;
-  $('#anb').onclick = () => anularVenta($('#anf').value || hoyISO(), $('#anfo').value, () => { S.admin.rep = null; if (S.vista === 'admin' && S.admin.tab === 'resumen') aResumen(); });
+  $('#anb').onclick = () => anularVenta($('#anf').value || hoyISO(), $('#anfo').value, () => { S.admin.rep = S.admin.od = null; if (S.vista === 'admin' && S.admin.tab === 'resumen') aResumen(); });
+  ordenesDia();
 }
 const DSEM = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
 function cuandoVendes(r){
@@ -1487,7 +1610,9 @@ document.addEventListener('click', async e => {
   if (a === 'salir') return cerrarSesion();
   if (a === 'recargar') return location.reload();
   if (a === 'imprimir') return print();
-  if (a === 'inicio'){ if (S.o?.nuevos?.length && !b.dataset.sure){ b.dataset.sure = 1; b.textContent = 'Hay productos sin guardar. ¿Salir?'; return; } S.o = null; S.vista = 'inicio'; render(); return cargaOrdenes(true); }
+  if (a === 'inicio'){ if (S.o?.nuevos?.length && !b.dataset.sure){ b.dataset.sure = 1; b.textContent = 'Hay productos sin guardar. ¿Salir?'; return; }
+    const v = S.vista === 'orden' && S.o?.desde === 'mapa' ? 'mapa' : 'inicio'; S.o = null; S.vista = v; render(); return v === 'inicio' ? cargaOrdenes(true) : undefined; }
+  if (a === 'mapa'){ if (S.vista === 'mapa') return pintaMapa(); S.vista = 'mapa'; return render(); }
   if (a === 'nueva'){ tipoSel = 'mesa'; S.vista = 'tipo'; render(); return; }
   if (a === 'guardar') return guardar(true);
   if (a === 'cobrar') return cobrar();
@@ -1509,6 +1634,7 @@ document.addEventListener('click', async e => {
 });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.ses && !locked && S.vista === 'inicio') cargaOrdenes(true); });
 setInterval(() => { if (S.ses && !locked && S.vista === 'inicio' && S.online) cargaOrdenes(true); }, 30000);
+setInterval(() => { if (S.ses && !locked && S.vista === 'mapa' && S.online) pintaMapa(); }, 30000);
 
 /* ================= inicio ================= */
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});

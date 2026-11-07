@@ -203,3 +203,29 @@ td.w{white-space:normal;min-width:200px}
 .qr .img{background:#fff;padding:10px;border-radius:12px;line-height:0}
 .qr .img svg{width:210px;height:210px}
 .clave2fa{font:700 18px ui-monospace,Menlo,monospace;letter-spacing:1px;word-break:break-all;user-select:all}
+
+/* v1.5 · folio visible, mapa del restaurante, órdenes del día */
+.folio{display:inline-flex;flex-direction:column;align-items:flex-end;line-height:1;font:800 30px var(--display);color:var(--accent);font-variant-numeric:tabular-nums}
+.folio small{font:700 10px var(--body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}
+.folio i{font:600 13px var(--body);font-style:normal;color:var(--warn)}
+.folio.big{font-size:40px;margin-left:auto}
+.folio-inline{color:var(--accent);font-weight:800;font-variant-numeric:tabular-nums}
+.folioaviso{text-align:center;align-items:center}
+.folioaviso h2{font-size:34px}
+.foliobig{display:inline-block;font:800 96px/1 var(--display);color:var(--accent);font-variant-numeric:tabular-nums}
+.foliobig.sm{font-size:40px}
+.folioaviso .anota{font-size:22px;font-weight:700;margin:0}
+.folioaviso .foot{width:100%}
+.mapa{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+.mtile{min-height:120px;border-radius:var(--r);border:1.5px solid var(--line);background:var(--surface);padding:10px;text-align:left;display:flex;flex-direction:column;gap:2px;position:relative;min-width:0}
+.mtile.occ{border:2px solid var(--accent);background:var(--accent-soft)}
+.mtile .mh{display:flex;justify-content:space-between;align-items:flex-start;gap:6px;min-width:0}
+.mtile.libre{background:var(--sunk);color:var(--muted);border-style:dashed;min-height:76px}
+.mtile .mn{font:800 22px var(--display);text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.mtile .mm{font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mtile .mt{font:800 22px var(--display);margin-top:auto}
+.mgroup{min-width:0}
+.odrow{cursor:pointer}
+.tag.est-abierta{background:var(--info-bg);color:var(--info)} .tag.est-cobrada{background:var(--ok-bg);color:var(--ok)}
+.tag.est-cancelada{background:var(--crit-bg);color:var(--crit)} .tag.est-unida{background:var(--sunk);color:var(--muted)}
+@media (max-width:560px){.foliobig{font-size:76px}.folio.big{font-size:32px}.mapa{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}}
