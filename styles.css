@@ -177,10 +177,19 @@ td.w{white-space:normal;min-width:200px}
 @media print{.bar,.noprint{display:none!important} body{background:#fff}}
 .ticketprev{font:14px/1.35 ui-monospace,Menlo,Consolas,monospace;background:var(--sunk);border-radius:10px;padding:12px;white-space:pre-wrap;margin:0;max-height:50vh;overflow:auto;user-select:text;-webkit-user-select:text}
 #printArea{display:none}
+/* v1.6 · ticket para impresora térmica: rollo de 80 mm (72 mm imprimibles, 48 letras) o 58 mm (48 mm, 32 letras).
+   Courier mide 0.6 em por letra: 72 mm ÷ (48 × 0.6) = 2.5 mm. Negro sobre blanco, sin fondos ni colores. */
+.tk{font-family:"Courier New",Courier,monospace;color:#000;background:#fff;margin:0 auto;padding:1mm 0 6mm}
+.tk80{width:72mm} .tk58{width:48mm}
+.tk .tl{font-size:2.5mm;line-height:1.3;white-space:pre;overflow:hidden;color:#000}
+.tk .tl.big{font-size:5mm;line-height:1.15;font-weight:700}
+.tk .tl.b{font-weight:700}
+.tk .tklogo{display:block;width:62%;margin:0 auto 1.5mm;filter:grayscale(1) contrast(2)}
 @media print{
-  body.imprimiendo #app, body.imprimiendo dialog, body.imprimiendo .toast{display:none!important}
-  body.imprimiendo #printArea{display:block;font:12px/1.3 ui-monospace,Menlo,Consolas,monospace;color:#000;width:72mm;margin:0;white-space:pre-wrap}
-  @page{margin:4mm}
+  body.imprimiendo #app, body.imprimiendo dialog, body.imprimiendo .toast, body.imprimiendo .lock{display:none!important}
+  body.imprimiendo{background:#fff!important;margin:0}
+  body.imprimiendo #printArea{display:block;margin:0;padding:0;background:#fff;color:#000}
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
 }
 @media (max-width:560px){
   .bar{flex-wrap:wrap;gap:6px 10px;padding:8px 12px}
@@ -249,3 +258,23 @@ td.w{white-space:normal;min-width:200px}
 .card.cerrada.cx .folio{color:var(--muted)}
 .card.cerrada .cxm{color:var(--muted);overflow-wrap:anywhere}
 .cerdet .paylist .payrow span:first-child{min-width:0;overflow-wrap:anywhere}
+
+/* v1.6 · Asistencia (entrada y salida) */
+.btn.checabtn{min-height:84px;font-size:24px;margin-bottom:18px;letter-spacing:.01em}
+.card.checa{display:flex;flex-direction:column;gap:12px;text-align:center;align-items:stretch;max-width:520px;margin:0 auto;padding:20px}
+.reloj{font:800 64px/1 var(--display);color:var(--fg);letter-spacing:.01em}
+.estado-chk{font-size:20px;margin:0}
+.btn.checabig{min-height:84px;font-size:24px}
+.marcaok{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;padding:24px 12px;border-radius:var(--r);background:var(--ok-bg);color:var(--ok)}
+.marcaok.salida{background:var(--info-bg);color:var(--info)}
+.marcaok .ic{font-size:56px;line-height:1}
+.marcaok h1{font-size:34px;color:inherit;margin:0;overflow-wrap:anywhere}
+.marcaok .horas{font-size:22px;margin:0;color:var(--fg)}
+.nasis{min-width:180px}
+.salidas{display:inline-block;margin-top:4px}
+.salidas.neg{color:var(--crit);font-weight:700}
+table.asis td{vertical-align:top}
+@media (max-width:560px){.reloj{font-size:52px}.marcaok h1{font-size:28px}.btn.checabtn,.btn.checabig{font-size:21px}}
+#cimp select{width:100%}
+#cimp label.row{flex-wrap:nowrap;align-items:flex-start}
+#cimp label.row input{flex:none;margin-top:1px}

@@ -7,7 +7,7 @@
 (() => {
 'use strict';
 const CFG = window.POS_CONFIG || {};
-const VERSION = '1.5.1';
+const VERSION = '1.6.0';
 
 /* ================= utilidades ================= */
 const $ = s => document.querySelector(s);
@@ -29,6 +29,8 @@ const ACCION = {cancelar_producto:'Canceló producto', cancelar_orden:'Canceló 
   bloqueo_pin:'Bloqueo por PIN', cambio_precio:'Cambio de precio', cambio_producto:'Cambio de producto', alta_producto:'Alta de producto',
   alta_personal:'Alta de personal', cambio_personal:'Cambio de personal', desbloquear:'Desbloqueo', cambio_ajuste:'Cambio de ajuste',
   anular_venta_cobrada:'Anuló venta cobrada', borrar_demo:'Borró datos demo',
+  asistencia_entrada:'Registró entrada', asistencia_salida:'Registró salida', asistencia_correccion:'Corrigió asistencia', reasignar_ordenes:'Reasignó órdenes',
+  enlazar_empleado:'Enlazó con Nómina', horario_empleado:'Cambió horario',
   uso_2fa:'Usó código de verificación', codigo_2fa_fallido:'Código de verificación incorrecto', activar_2fa:'Activó verificación en dos pasos', quitar_2fa:'Quitó verificación en dos pasos'};
 const folioTxt = o => o.folio ? '#' + o.folio : '';
 const folioHTML = (o, cls = '') => `<span class="folio ${cls}"><small>Folio</small>${o.folio ? '#' + esc(o.folio) : '<i>por asignar</i>'}</span>`;
@@ -56,6 +58,8 @@ const S = {
   o: null,              // orden en edición {id, tipo, mesa, cliente, items(server), nuevos[]}
   cat: 'Paquetes',
   cola: store.get('cola', []),
+  colaAsis: store.get('cola_asis', []),   // marcas de asistencia hechas sin internet (se borran al enviarse)
+  chk: null,            // pantalla de checar entrada / salida (sin sesión)
   errores: store.get('errores', []),
   online: navigator.onLine,
   admin: {tab:'resumen', desde:null, hasta:null, demo:false, rep:null, bit:null, per:null, prods:null, cfg:null},
@@ -83,6 +87,7 @@ async function rpc(fn, params){
     const code = i > 0 && /^[A-Z_]+$/.test(m.slice(0,i)) ? m.slice(0,i) : 'SERVIDOR';
     const msg = code === 'SERVIDOR' ? m : m.slice(i + 2);
     if (code === 'SESION' && S.ses) { setTimeout(() => cerrarSesion(msg), 0); }
+    if (code === 'SIN_ENTRADA' && S.ses && S.vista !== 'entrada') { setTimeout(() => { cierraModal(); S.o = null; S.vista = 'entrada'; render(); }, 0); }
     throw new ApiError(code, msg);
   }
   return body;
@@ -103,7 +108,7 @@ async function sincroniza(){
         if (it.fn === 'pos_guardar_orden' && r?.orden?.folio && !S.ordenes[r.orden.id]?.folio){ S.ordenes[r.orden.id] = {...r.orden}; toast(`Ya hay internet: ${etiquetaOrden(r.orden)} es la orden #${r.orden.folio}. Anótalo en la comanda.`); } }
       catch(e){
         if (e.code === 'RED') break;
-        if (e.code === 'SESION') break;
+        if (e.code === 'SESION' || e.code === 'SIN_ENTRADA') break;
         S.cola = S.cola.filter(x => x.id !== it.id);
         S.errores.push({ts: Date.now(), msg: e.message, fn: it.fn, staff: it.staff}); guardaCola();
         toast('Una operación guardada sin internet no se pudo registrar: ' + e.message, true);
@@ -171,7 +176,7 @@ function bloquear(){
       const r = await rpc('pos_login', {p_clave: S.clave, p_staff: S.ses.staff.id, p_pin: pin}).catch(e => e);
       if (r instanceof ApiError && r.code === 'RED'){ return desbloqueoLocal(pin); }
       if (r instanceof ApiError){ $('#lmsg').textContent = r.message; return false; }
-      const listo = r2 => { const viejo = S.ses.token; S.ses.token = r2.token; rpc('pos_logout', {p_token: viejo}).catch(() => {}); quitaLock(); };
+      const listo = r2 => { const viejo = S.ses.token; S.ses.token = r2.token; rpc('pos_logout', {p_token: viejo}).catch(() => {}); if (r2.requiere_entrada){ S.o = null; S.vista = 'entrada'; } quitaLock(); };
       if (!r.ok && r.requiere_codigo){
         pideCodigo(el, S.ses.staff.nombre, async cod => {
           const r2 = await rpc('pos_login', {p_clave: S.clave, p_staff: S.ses.staff.id, p_pin: pin, p_codigo: cod}).catch(e => e);
@@ -195,7 +200,7 @@ async function desbloqueoLocal(pin){
 function quitaLock(){ locked = false; $('#lock')?.remove(); tocar(); render(); }
 async function cerrarSesion(msg){
   const t = S.ses?.token; S.ses = null; S.o = null; S.ordenes = {}; S.vista = 'inicio';
-  S.admin = {tab:'resumen', desde:null, hasta:null, demo:false}; S.cer = nuevoCer();
+  S.admin = {tab:'resumen', desde:null, hasta:null, demo:false}; S.cer = nuevoCer(); S.chk = null;
   clearTimeout(idleT); $('#lock')?.remove(); locked = false; cierraModal();
   if (t) rpc('pos_logout', {p_token: t}).catch(() => {});
   render(); if (msg) toast(msg, true);
@@ -213,8 +218,8 @@ function barra(extra){
 function render(){
   if (!CFG.API_URL) return vSinConfig();
   if (!S.clave) return vClave();
-  if (!S.ses) return vLogin();
-  const v = {inicio: vInicio, tipo: vTipo, orden: vOrden, corte: vCorte, admin: vAdmin, rutina: vRutina, mapa: vMapa}[S.vista] || vInicio;
+  if (!S.ses) return S.chk ? vChecador() : vLogin();
+  const v = {inicio: vInicio, tipo: vTipo, orden: vOrden, corte: vCorte, admin: vAdmin, rutina: vRutina, mapa: vMapa, entrada: vEntrada, asistencia: vAsistenciaHoy}[S.vista] || vInicio;
   v(); pintaSync();
 }
 function vSinConfig(){
@@ -234,15 +239,22 @@ function vClave(){
 }
 async function vLogin(sel){
   app().innerHTML = barra() + `<main><div class="login" id="lg"><p class="muted">Cargando…</p></div></main>`; pintaSync();
-  try { S.personal = await rpc('pos_personal', {p_clave: S.clave}); }
+  try { S.personal = await rpc('pos_personal', {p_clave: S.clave}); store.set('personal', S.personal); }
   catch(e){
+    if (!$('#lg')) return;
     if (e.code === 'DISPOSITIVO'){ S.clave = null; store.del('clave'); return render(); }
-    $('#lg').innerHTML = `<div class="banner">${esc(e.message)} Para entrar se necesita internet.</div><button class="btn big" data-act="recargar">Reintentar</button>`; return;
+    S.personal = store.get('personal', []);
+    $('#lg').innerHTML = `${S.personal.length ? '<button class="btn pri big block checabtn" data-act="checar">Registrar entrada / salida</button>' : ''}
+      <div class="banner">${esc(e.message)} Para entrar al POS se necesita internet.${S.personal.length ? ' La entrada y salida sí se pueden registrar: se guardan en la tablet con su hora.' : ''}</div><button class="btn big" data-act="recargar">Reintentar</button>`; return;
   }
+  if (!$('#lg') || S.ses || S.chk) return;   // ya cambió de pantalla mientras cargaba
   if (!sel){
-    const real = S.personal.filter(p => !p.es_demo), demo = S.personal.filter(p => p.es_demo);
+    const pos = S.personal.filter(p => p.rol !== 'asistencia');
+    const real = pos.filter(p => !p.es_demo), demo = pos.filter(p => p.es_demo);
     const card = p => `<button class="person" data-pick="${esc(p.id)}">${esc(p.nombre)}<small>${p.rol === 'mesero' ? 'mesero' : p.rol === 'encargada' ? 'encargada' : 'administrador'}</small></button>`;
-    $('#lg').innerHTML = `<h1>¿Quién eres?</h1><div class="grid people">${real.map(card).join('')}</div>
+    $('#lg').innerHTML = `<button class="btn pri big block checabtn" data-act="checar">Registrar entrada / salida</button>
+      ${S.colaAsis.length ? `<p class="banner">${S.colaAsis.length} marca(s) de asistencia guardadas sin internet. Se envían solas al volver el internet.</p>` : ''}
+      <h1>¿Quién eres?</h1><div class="grid people">${real.map(card).join('')}</div>
       ${demo.length ? `<h3>Personal de prueba <span class="demo">DEMO</span></h3><div class="grid people">${demo.map(card).join('')}</div>` : ''}
       ${S.cola.length ? `<p class="banner" style="margin-top:16px">Hay ${S.cola.length} operación(es) guardadas sin internet. Se envían cuando entre la persona que las hizo.</p>` : ''}
       <p class="note">v${VERSION}</p>`;
@@ -258,7 +270,9 @@ async function vLogin(sel){
     const entra = async r2 => {
       const salt = uuid();
       S.ses = {token: r2.token, staff: r2.staff, config: r2.config, salt, pinHash: await sha256(salt + pin)};
-      S.vista = 'inicio'; tocar();
+      tocar();
+      if (r2.requiere_entrada){ S.vista = 'entrada'; return render(); }   // primero la entrada del día
+      S.vista = 'inicio';
       await cargaMenu(); render(); sincroniza();
     };
     if (!r.ok && r.requiere_codigo){
@@ -270,7 +284,7 @@ async function vLogin(sel){
       }, () => vLogin());
       return true;
     }
-    if (!r.ok){ $('#pmsg').textContent = r.error; return false; }
+    if (!r.ok){ $('#pmsg').textContent = r.error; if (r.solo_asistencia) setTimeout(() => { if ($('#pmsg')) vLogin(); }, 3500); return false; }
     await entra(r); return true;
   });
 }
@@ -337,7 +351,7 @@ function vInicio(){
   const errs = r !== 'mesero' && S.errores.length ? `<div class="banner crit">${S.errores.length} operación(es) hechas sin internet no se registraron. <button class="btn sm" data-act="verErrores">Ver</button></div>` : '';
   app().innerHTML = barra() + `<main>${errs}
     <div class="row" style="margin-bottom:14px"><button class="btn pri big" data-act="nueva" style="flex:1;min-width:220px">+ Nueva orden</button>
-      ${r !== 'mesero' ? '<button class="btn big" data-act="rutina">Apertura y cierre</button><button class="btn big" data-act="corte">Corte de caja</button>' : ''}${r === 'admin' ? '<button class="btn big" data-act="mapa">Mapa del restaurante</button><button class="btn big" data-act="anular">Anular venta cobrada</button><button class="btn big" data-act="admin">Panel</button>' : ''}</div>
+      ${r !== 'mesero' ? '<button class="btn big" data-act="rutina">Apertura y cierre</button><button class="btn big" data-act="corte">Corte de caja</button><button class="btn big" data-act="asistencia">Quién está hoy</button>' : ''}${r === 'admin' ? '<button class="btn big" data-act="mapa">Mapa del restaurante</button><button class="btn big" data-act="anular">Anular venta cobrada</button><button class="btn big" data-act="admin">Panel</button>' : ''}</div>
     <h3>${r === 'mesero' ? 'Mis órdenes abiertas' : 'Mis órdenes'}</h3>
     ${mias.length ? `<div class="grid cards">${mias.map(card).join('')}</div>` : '<div class="empty">No tienes órdenes abiertas.</div>'}
     ${r !== 'mesero' ? `<h3>Órdenes abiertas de los demás</h3>${otras.length ? `<div class="grid cards">${otras.map(card).join('')}</div>` : '<div class="empty">Ninguna.</div>'}` : ''}
@@ -431,7 +445,7 @@ async function detalleCerrada(id){
     ${cx ? '' : `<div class="foot"><button class="btn big" data-x="tk">Reimprimir ticket</button>${rol() === 'admin' ? '<button class="btn big cx" data-x="anu">Anular venta cobrada</button>' : ''}</div>`}</div>`);
   const d = dlg();
   d.querySelector('[data-x="no"]').onclick = cierraModal;
-  const tk = d.querySelector('[data-x="tk"]'); if (tk) tk.onclick = () => imprimeTicket({...o, reimpresion: true}, true);
+  const tk = d.querySelector('[data-x="tk"]'); if (tk) tk.onclick = () => imprimir('ticket', o);
   const an = d.querySelector('[data-x="anu"]'); if (an) an.onclick = () => anularVenta(o.fecha, o.folio, () => { S.admin.od = S.admin.rep = null; cargaCerradas(true); });
 }
 function abreOrden(id, desde){ const o = S.ordenes[id]; if (!o) return; S.o = {...o, items: [...(o.items || [])], nuevos: [], desde}; S.cat = CATS[0]; S.vista = 'orden'; render(); }
@@ -496,7 +510,7 @@ function vOrden(){
         <button class="btn pri big" data-act="guardar" ${o.nuevos.length ? '' : 'disabled'}>Guardar orden${o.nuevos.length ? ` (${o.nuevos.reduce((a, n) => a + n.cantidad, 0)} nuevo${o.nuevos.length > 1 ? 's' : ''})` : ''}</button>
         <div class="row"><button class="btn ok big" data-act="cobrar" style="flex:1" ${lineas.some(l => l.estado !== 'cancelado') ? '' : 'disabled'}>Cobrar</button>
           ${!o.nueva ? `<button class="btn big" data-act="desc" title="Descuento (requiere autorización)">%</button>` : ''}</div>
-        <div class="row">${lineas.some(l => l.estado !== 'cancelado') ? `<button class="btn" data-act="cuenta" style="flex:1">Ver cuenta</button>` : ''}${!o.nueva && o.tipo === 'mesa' && !o.pendiente ? `<button class="btn" data-act="mover" style="flex:1">⇄ Cambiar o unir mesa</button>` : ''}</div>
+        <div class="row">${lineas.some(l => l.estado !== 'cancelado') ? `<button class="btn" data-act="cuenta" style="flex:1">🖨 Pedir cuenta</button>${o.precuentas > 0 ? `<button class="btn" data-act="recuenta" style="flex:1">Reimprimir${o.precuenta_cambio || o.nuevos.length ? ' (cambió)' : ''}</button>` : ''}` : ''}${!o.nueva && o.tipo === 'mesa' && !o.pendiente ? `<button class="btn" data-act="mover" style="flex:1">⇄ Cambiar o unir mesa</button>` : ''}</div>
         ${!o.nueva && !o.pendiente ? '<button class="btn big cx" data-act="cancelOrden">Cancelar orden</button>' : ''}</div>
     </aside></div></main>`;
   app().querySelectorAll('[data-cat]').forEach(b => b.onclick = () => { S.cat = b.dataset.cat; vOrden(); pintaSync(); });
@@ -674,7 +688,8 @@ async function enviaCobro(o, pagos){
     abreModal(`<div class="sheet" style="text-align:center"><h2>Cobrado ✓</h2><p class="muted">${(ord || o).folio ? `Orden #${esc((ord || o).folio)} · ` : ''}${esc(etiquetaOrden(o))}${offline ? ' · se registrará al volver el internet' : ''}</p>
       ${cambio > 0 ? `<div class="cambio">Cambio a entregar<b class="num">${money(cambio)}</b></div>` : ''}${propina > 0 ? `<p class="muted">Propina registrada: <b>${money(propina)}</b></p>` : ''}
       <div class="foot"><button class="btn big" data-x="tk">Imprimir ticket</button><button class="btn pri big" data-x="ok">Listo</button></div></div>`);
-    dlg().querySelector('[data-x="tk"]').onclick = () => imprimeTicket(tk, true);
+    dlg().querySelector('[data-x="tk"]').onclick = () => imprimir('ticket', tk);
+    if (S.ses.config?.imprimir_al_cobrar === true) imprimir('ticket', tk);
     dlg().querySelector('[data-x="ok"]').onclick = () => { cierraModal(); S.o = null; S.vista = 'inicio'; render(); };
   };
   if (pendientes() || !S.online){ encola('pos_cobrar', params); return fin(true); }
@@ -682,37 +697,131 @@ async function enviaCobro(o, pagos){
   catch(e){ if (e.code === 'RED'){ encola('pos_cobrar', params); return fin(true); } toast(e.message, true); }
 }
 
-/* ---------- pre-cuenta y ticket ---------- */
-function ticketTexto(o, pagado){
-  const cfg = S.ses.config || {}; const t = o.subtotal != null ? {sub: o.subtotal, desc: o.descuento, total: o.total} : totales(o);
-  const L = []; const W = 32; const pad = (a, b) => { a = String(a); b = String(b); return a.length + b.length + 1 > W ? a + '\n' + ' '.repeat(Math.max(0, W - b.length)) + b : a + ' '.repeat(W - a.length - b.length) + b; };
-  String(cfg.ticket_encabezado || 'Ahogaditas Tapatío').split('\n').forEach(x => L.push(x));
-  L.push('-'.repeat(W)); L.push(pagado ? (o.reimpresion ? 'TICKET (REIMPRESIÓN)' : 'TICKET') : 'CUENTA (no es comprobante de pago)');
-  if (o.folio){ const f = `FOLIO #${o.folio}`; L.push(' '.repeat(Math.max(0, Math.floor((W - f.length - 8) / 2))) + `*** ${f} ***`); }
-  L.push(etiquetaOrden(o));
-  L.push(new Date(o.cobrada_en || Date.now()).toLocaleString('es-MX', {dateStyle: 'short', timeStyle: 'short'}) + (o.mesero ? ' · ' + o.mesero : '')); L.push('-'.repeat(W));
-  (o.items || []).filter(i => i.estado !== 'cancelado').concat(o.nuevos || []).forEach(i => { L.push(pad(`${i.cantidad} ${i.nombre}`, money(i.cantidad * i.precio_unit))); if (i.variante) L.push('  ' + i.variante); });
-  L.push('-'.repeat(W));
-  if (t.desc) { L.push(pad('Subtotal', money(t.sub))); L.push(pad('Descuento', '-' + money(t.desc))); }
-  L.push(pad('TOTAL', money(t.total)));
-  if (pagado){ (o.pagos || []).forEach(p => L.push(pad(METODO[p.metodo] || p.metodo, money(p.monto)))); if (o.propina > 0) L.push(pad('Propina', money(o.propina)));
-    const camb = (o.pagos || []).reduce((a, p) => a + (Number(p.cambio) || (p.metodo === 'efectivo' && p.recibido ? p.recibido - p.monto - (p.propina || 0) : 0)), 0); if (camb > 0) L.push(pad('Cambio', money(camb))); }
-  else if (S.ses.config?.propinas_activas !== false) { L.push(pad('Propina sugerida 10 %', money(r2(t.total * .10)))); L.push(pad('Propina sugerida 15 %', money(r2(t.total * .15)))); }
-  L.push('Precios con IVA incluido'); L.push('-'.repeat(W)); String(cfg.ticket_pie || '¡Gracias por su visita!').split('\n').forEach(x => L.push(x));
-  return L.join('\n');
+/* ---------- pre-cuenta y ticket (impresora térmica, impresión del navegador) ----------
+ * Un solo formato para todo: pre-cuenta, ticket de venta y ticket de prueba.
+ * Rollo de 80 mm = 48 caracteres por línea; 58 mm = 32. Letra monoespaciada negra.
+ * En la computadora del local, Chrome abre el POS con --kiosk-printing: imprime
+ * directo en la térmica (impresora predeterminada) sin cuadro de diálogo.
+ * Sin ese modo, aparece el diálogo de impresión con el ticket ya listo. */
+const LOGO_TICKET = new Image(); LOGO_TICKET.src = 'logo_ticket.png';   // se carga desde antes para que no salga en blanco
+const anchoMM = () => Number(S.ses?.config?.ticket_ancho_mm) === 58 ? 58 : 80;
+const colsTicket = mm => mm === 58 ? 32 : 48;
+const m2 = v => fmt2.format(Number(v) || 0);
+function cortaTexto(txt, w){ // parte en renglones de máximo w letras (corta palabras demasiado largas)
+  const out = []; let cur = '';
+  for (let p of String(txt || '').split(/\s+/).filter(Boolean)){
+    while (p.length > w){ if (cur){ out.push(cur); cur = ''; } out.push(p.slice(0, w)); p = p.slice(w); }
+    if (!cur) cur = p; else if (cur.length + 1 + p.length <= w) cur += ' ' + p; else { out.push(cur); cur = p; }
+  }
+  if (cur) out.push(cur);
+  return out.length ? out : [''];
 }
-function imprimeTicket(o, pagado){
-  const txt = ticketTexto(o, pagado); const el = $('#printArea'); el.textContent = txt;
-  document.body.classList.add('imprimiendo'); setTimeout(() => { print(); setTimeout(() => document.body.classList.remove('imprimiendo'), 500); }, 50);
+const centra = (s, w) => { s = String(s).slice(0, w); return ' '.repeat(Math.floor((w - s.length) / 2)) + s; };
+const horaTk = hhmm => { const [h, m] = String(hhmm || '').split(':').map(Number); if (isNaN(h)) return ''; return `${h % 12 || 12}${m ? ':' + String(m).padStart(2, '0') : ''} ${h < 12 ? 'am' : 'pm'}`; };
+const fechaTk = t => new Date(t || Date.now()).toLocaleDateString('es-MX', {timeZone: 'America/Monterrey', day: '2-digit', month: '2-digit', year: 'numeric'}) + ' ' + horaAP(t || Date.now());
+// Renglones del ticket: [{s: texto, big: letra doble, b: negritas}]
+function ticketLineas(o, tipo, info = {}){
+  const cfg = S.ses?.config || {}; const mm = info.mm || anchoMM(); const W = colsTicket(mm), WB = Math.floor(W / 2);
+  const t = o.subtotal != null ? {sub: Number(o.subtotal), desc: Number(o.descuento) || 0, total: Number(o.total)} : totales(o);
+  const L = []; const add = (s, x = {}) => L.push({s, ...x}); const sep = () => add('-'.repeat(W));
+  const cen = (s, x) => cortaTexto(s, W).forEach(r => add(centra(r, W), x));
+  const par = (a, b, w = W, x) => { a = String(a); b = String(b); if (a.length + b.length + 1 > w){ add(a, x); add(' '.repeat(Math.max(0, w - b.length)) + b, x); } else add(a + ' '.repeat(w - a.length - b.length) + b, x); };
+  // encabezado: nombre en grande (debajo del logo), dirección y horario
+  String(cfg.ticket_encabezado || 'Ahogaditas Tapatío\nPuerta del Sol, Monterrey').split('\n').filter(x => x.trim()).forEach((x, i) =>
+    i === 0 ? cortaTexto(x.toUpperCase(), WB).forEach(r => add(centra(r, WB), {big: true})) : cen(x));
+  const h = cfg.horario_local; cen(`Horario ${horaTk(h?.abre || '10:00')} a ${horaTk(h?.cierra || '18:00')}`);
+  sep();
+  if (info.reimpresion) add(centra('*** REIMPRESIÓN ***', W), {b: true});
+  if (tipo === 'prueba'){
+    cen('TICKET DE PRUEBA', {b: true}); cen(`Rollo de ${mm} mm · ${W} letras por renglón`); add(fechaTk(info.cuando));
+    sep(); add('1234567890'.repeat(5).slice(0, W)); add('|' + ' '.repeat(W - 2) + '|'); add('<' + '-'.repeat(W - 2) + '>');
+    cen('Si ves los dos bordes | completos, el ancho está bien.'); par('Precio de ejemplo', m2(1234.5)); add(centra('TOTAL $1,234.50', WB), {big: true});
+  } else {
+    cen(tipo === 'ticket' ? 'TICKET DE VENTA – NO ES COMPROBANTE FISCAL' : 'PRE-CUENTA – NO ES COMPROBANTE FISCAL', {b: true});
+    if (info.actualizada) add(centra('*** PRE-CUENTA ACTUALIZADA ***', W), {b: true});
+    par(`Folio #${o.folio || 'por asignar'}`, o.tipo ? lugarOrden(o) : '', W, {b: true});
+    if (o.mesero) add(`Mesero: ${o.mesero}`);
+    add(fechaTk(tipo === 'ticket' ? (o.cobrada_en || info.cuando) : info.cuando) + (info.sin_conexion ? ' (sin internet)' : ''));
+    sep();
+    // columnas: cantidad · descripción · precio · importe
+    const [cq, cp, ci] = W === 48 ? [4, 10, 11] : [3, 8, 9]; const cn = W - cq - cp - ci;
+    const fila = (q, n, p, i) => String(q).padStart(cq - 1) + ' ' + String(n).padEnd(cn).slice(0, cn) + String(p).padStart(cp) + String(i).padStart(ci);
+    add(fila('CT', W === 48 ? 'DESCRIPCIÓN' : 'PRODUCTO', 'PRECIO', 'IMPORTE'));
+    (o.items || []).filter(i => i.estado !== 'cancelado').concat(o.nuevos || []).forEach(i => {
+      const nom = cortaTexto(i.nombre, cn - 1);
+      add(fila(i.cantidad, nom[0], m2(i.precio_unit).replace('$', ''), m2(i.cantidad * i.precio_unit).replace('$', '')));
+      nom.slice(1).forEach(r => add(' '.repeat(cq) + r));
+      [i.variante, i.nota ? 'Nota: ' + i.nota : ''].filter(Boolean).forEach(v => cortaTexto(v, cn - 1 + cp + ci - 2).forEach(r => add(' '.repeat(cq + 1) + r)));
+    });
+    sep();
+    if (t.desc){ par('Subtotal', m2(t.sub)); par('Descuento', '-' + m2(t.desc)); }
+    par('TOTAL', m2(t.total), WB, {big: true});
+    if (tipo === 'ticket'){
+      (o.pagos || []).forEach(p => par(METODO[p.metodo] || p.metodo, m2(p.monto)));
+      if (Number(o.propina) > 0) par('Propina', m2(o.propina));
+      const camb = (o.pagos || []).reduce((a, p) => a + (Number(p.cambio) || 0), 0); if (camb > 0) par('Cambio', m2(camb));
+    } else if (cfg.propinas_activas !== false){
+      sep(); cen('Propina no incluida', {b: true});
+      [10, 15, 20].forEach(p => par(`Propina sugerida ${p} %`, m2(r2(t.total * p / 100))));
+    }
+  }
+  sep();
+  String(cfg.ticket_pie || '¡Gracias por su visita!\nSíguenos en Facebook e Instagram').split('\n').filter(x => x.trim()).forEach(x => cen(x));
+  if (cfg.iva_incluido !== false) cen('Precios con IVA incluido');
+  if (info.reimpresion) add(centra('*** REIMPRESIÓN ***', W), {b: true});
+  return {L, W, mm};
 }
-function preCuenta(){
-  const o = S.o; const txt = ticketTexto(o, false);
+const ticketTexto = (o, tipo, info) => ticketLineas(o, tipo, info).L.map(x => x.s).join('\n');
+function ticketHTML(o, tipo, info){
+  const {L, mm} = ticketLineas(o, tipo, info);
+  return `<div class="tk tk${mm}" data-mm="${mm}"><img class="tklogo" src="logo_ticket.png" alt="">${L.map(x => `<div class="tl${x.big ? ' big' : ''}${x.b ? ' b' : ''}">${esc(x.s) || '&nbsp;'}</div>`).join('')}</div>`;
+}
+// Manda el ticket a la impresora: arma el HTML, ajusta el tamaño del papel y llama window.print()
+async function mandaImprimir(html, mm){
+  const el = $('#printArea'); el.innerHTML = html;
+  let st = $('#pageStyle'); if (!st){ st = document.createElement('style'); st.id = 'pageStyle'; document.head.appendChild(st); }
+  st.textContent = `@media print{@page{size:${mm}mm auto;margin:0}}`;
+  const img = el.querySelector('img');
+  if (img){ if (!img.complete) await Promise.race([img.decode().catch(() => {}), new Promise(r => setTimeout(r, 1500))]); if (!img.naturalWidth) img.remove(); }   // sin logo: queda el nombre en grande
+  document.body.classList.add('imprimiendo');
+  try { window.print(); } finally { setTimeout(() => document.body.classList.remove('imprimiendo'), 600); }
+}
+// Registra la impresión en el servidor (hora del servidor, reimpresión, pre-cuenta actualizada) e imprime.
+// Sin internet: imprime con lo que hay en pantalla y la registra cuando vuelva la conexión.
+async function imprimir(tipo, o){
+  const id = uuid(); const params = {p_orden: tipo === 'prueba' ? null : o.id, p_tipo: tipo, p_id: id};
+  let info = null, ord = o;
+  if (S.online && !pendientes() && !o.pendiente){
+    try { info = await call('pos_imprimir', params); if (info.orden) ord = {...info.orden, nuevos: []}; }
+    catch(e){ if (e.code !== 'RED'){ toast(e.message, true); return null; } }
+  }
+  if (!info){
+    const hora = new Date().toISOString(); encola('pos_imprimir', {...params, p_hora_tablet: hora});
+    const k = tipo === 'ticket' ? 'tickets_local' : 'precuentas'; const prev = Number(o[k]) || 0;
+    info = {cuando: hora, sin_conexion: true, n: prev + 1, reimpresion: prev > 0 && !o.precuenta_cambio, actualizada: prev > 0 && !!o.precuenta_cambio};
+    o[k] = prev + 1; o.precuenta_cambio = false;
+  }
+  if (tipo === 'precuenta' && o.id){ for (const x of [S.ordenes[o.id], S.o?.id === o.id ? S.o : null]) if (x){ x.precuentas = info.n; x.precuenta_cambio = false; } }
+  await mandaImprimir(ticketHTML(ord, tipo, info), anchoMM());
+  return {info, ord};
+}
+// "Pedir cuenta": guarda lo pendiente, imprime la pre-cuenta (automático si así está en Ajustes) y la muestra
+async function pedirCuenta(reimprimir){
+  if (S.o.nuevos?.length && !(await guardar(false))) return;
+  const o = S.o;
+  if (reimprimir || S.ses.config?.imprimir_auto_cuenta !== false){ const r = await imprimir('precuenta', o); if (!r) return;
+    if (S.vista === 'orden' && S.o){ vOrden(); pintaSync(); }   // aparece “Reimprimir” en la orden
+    muestraCuenta(r.ord, r.info); }
+  else muestraCuenta(o, null);
+}
+function muestraCuenta(o, info){
+  const txt = ticketTexto(o, 'precuenta', info || {});
   abreModal(`<div class="sheet"><div class="row"><h2 style="margin:0">Cuenta ${o.folio ? `<span class="folio-inline">${folioTxt(o)}</span> ` : ''}· ${esc(etiquetaOrden(o))}</h2><span class="spacer"></span><button class="btn sm" data-x="no">Cerrar</button></div>
+    ${info ? `<div class="banner" style="margin:0;background:var(--ok-bg);color:var(--ok)">Enviada a la impresora ✓${info.actualizada ? ' · PRE-CUENTA ACTUALIZADA (la orden cambió)' : info.reimpresion ? ` · reimpresión (${info.n}ª vez)` : ''}${info.sin_conexion ? ' · sin internet: se registrará al volver la conexión' : ''}</div>` : ''}
     <pre class="ticketprev">${esc(txt)}</pre>
-    ${o.nuevos?.length ? '<div class="banner">Hay productos sin guardar: se incluyen en la cuenta, pero guarda la orden antes de cobrar.</div>' : ''}
-    <div class="foot"><button class="btn big" data-x="share">Compartir</button><button class="btn pri big" data-x="print">Imprimir</button></div></div>`);
+    <div class="foot"><button class="btn big" data-x="share">Compartir</button><button class="btn pri big" data-x="print">${info ? 'Reimprimir' : 'Imprimir'}</button></div></div>`);
   dlg().querySelector('[data-x="no"]').onclick = cierraModal;
-  dlg().querySelector('[data-x="print"]').onclick = () => imprimeTicket(o, false);
+  dlg().querySelector('[data-x="print"]').onclick = () => pedirCuenta(true);
   dlg().querySelector('[data-x="share"]').onclick = async () => {
     if (navigator.share){ try { await navigator.share({title: 'Cuenta ' + etiquetaOrden(o), text: txt}); return; } catch(e){ if (e.name === 'AbortError') return; } }
     location.href = 'https://wa.me/?text=' + encodeURIComponent(txt);
@@ -763,7 +872,7 @@ async function hojaAutoriza(titulo, detalle, motivos, extraHTML, onOk, onDraw, o
       .forEach(p => aut.push({k: 'tel:' + p.id, id: p.id, nombre: p.nombre, tel: true, dos_pasos: true}));
     if (!aut.length) return toast(obliga ? 'El administrador no tiene la verificación en dos pasos activa: no se puede autorizar. ' + SOLO_ADMIN : SOLO_ADMIN, true);
   } else {
-    aut = S.personal.filter(p => p.rol !== 'mesero' && mismo(p)).map(p => ({k: p.id, id: p.id, nombre: p.nombre, tel: false, dos_pasos: p.dos_pasos}));
+    aut = S.personal.filter(p => (p.rol === 'encargada' || p.rol === 'admin') && mismo(p)).map(p => ({k: p.id, id: p.id, nombre: p.nombre, tel: false, dos_pasos: p.dos_pasos}));
     if (!aut.length) return toast('No hay quién pueda autorizar.', true);
   }
   let quien = aut.find(p => p.k === S.ses.staff.id)?.k || (aut.length === 1 ? aut[0].k : null); let motivo = ''; let pin = ''; let cod = ''; let pideCod = false;
@@ -977,12 +1086,299 @@ async function detalleOrden(id){
     <h3 style="margin:4px 0 0">Descuento</h3>${o.descuento_tipo ? `<div class="payrow"><span>${o.descuento_tipo === 'pct' ? esc(o.descuento_valor) + ' %' : money(o.descuento_valor)} · ${esc(o.descuento_motivo || '')} · autorizó ${esc(o.descuento_autorizo || '')}</span><span class="num">−${money(o.descuento)}</span></div>` : '<p class="muted" style="margin:0">Sin descuento.</p>'}
     <h3 style="margin:4px 0 0">Pagos</h3>${o.pagos_detalle.length ? `<div class="paylist">${o.pagos_detalle.map(p => `<div class="payrow"><span>${esc(METODO[p.metodo] || p.metodo)}${p.propina > 0 ? ` · propina ${money(p.propina)}` : ''} · ${hora(p.cuando)} · cobró ${esc(p.cobro || '')}</span><span class="num">${money(p.monto)}</span></div>`).join('')}</div>` : '<p class="muted" style="margin:0">Sin pagos.</p>'}
     <div class="tot"><span>Total</span><b class="num">${money(o.total)}</b></div>
-    <div class="foot"><button class="btn big" data-x="tk">Imprimir ticket</button>${o.estado === 'cobrada' ? '<button class="btn big cx" data-x="anu">Anular esta venta</button>' : ''}</div></div>`);
+    <h3 style="margin:4px 0 0">Impresiones</h3>${o.impresiones?.length ? `${o.impresiones.some(i => i.actualizada) ? '<div class="banner" style="margin:0">La orden cambió después de imprimir la pre-cuenta: se imprimió una PRE-CUENTA ACTUALIZADA.</div>' : ''}<div class="paylist">${o.impresiones.map(i => `<div class="payrow"><span>${i.tipo === 'ticket' ? 'Ticket de venta' : 'Pre-cuenta'} ${i.n}ª${i.actualizada ? ' · <b>ACTUALIZADA</b>' : i.reimpresion ? ' · reimpresión' : ''}${i.sin_conexion ? ' · sin internet' : ''} · ${esc(i.quien || '')}</span><span>${hora(i.cuando)}</span></div>`).join('')}</div>` : '<p class="muted" style="margin:0">No se ha impreso.</p>'}
+    <div class="foot"><button class="btn big" data-x="tk">${o.estado === 'cobrada' ? 'Reimprimir ticket' : 'Imprimir pre-cuenta'}</button>${o.estado === 'cobrada' ? '<button class="btn big cx" data-x="anu">Anular esta venta</button>' : ''}</div></div>`);
   const d = dlg();
   d.querySelector('[data-x="no"]').onclick = cierraModal;
-  d.querySelector('[data-x="tk"]').onclick = () => imprimeTicket(o, o.estado === 'cobrada');
+  d.querySelector('[data-x="tk"]').onclick = () => imprimir(o.estado === 'cobrada' ? 'ticket' : 'precuenta', o);
   const an = d.querySelector('[data-x="anu"]'); if (an) an.onclick = () => anularVenta(o.fecha, o.folio, () => { S.admin.od = S.admin.rep = null; if (S.vista === 'admin' && S.admin.tab === 'resumen') aResumen(); });
 }
+
+/* ================= ASISTENCIA (entrada y salida) =================
+ * La hora la pone el servidor. Sin internet, la marca se guarda en la tablet
+ * con la hora de la tablet y llega etiquetada "sin conexión".
+ * Cada quien checa con SU PIN. El servidor valida todo (rol, PIN, bloqueo). */
+const TZ = 'America/Monterrey';
+function horaAP(t){ // "9:52 am"
+  const p = new Intl.DateTimeFormat('en-US', {timeZone: TZ, hour: 'numeric', minute: '2-digit', hour12: true}).formatToParts(new Date(t));
+  const g = k => p.find(x => x.type === k)?.value || '';
+  return `${g('hour')}:${g('minute')} ${g('dayPeriod').toLowerCase()}`;
+}
+const durTxt = seg => { const m = Math.round((Number(seg) || 0) / 60); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`; };
+const isoMty = (fecha, hhmm) => `${fecha}T${hhmm}:00-06:00`;   // Monterrey: UTC−6 todo el año (sin horario de verano)
+const hhmmMty = t => t ? new Date(t).toLocaleTimeString('en-GB', {timeZone: TZ, hour: '2-digit', minute: '2-digit'}) : '';
+const ESTADO_ASIS = {dentro: ['Dentro', 'est-cobrada'], salio: ['Ya salió', 'est-unida'], falta: ['Falta', 'est-cancelada'], por_llegar: ['Por llegar', 'pend'], descanso: ['Descansa', 'est-unida']};
+
+/* ---------- cola sin internet ---------- */
+function guardaColaAsis(){ store.set('cola_asis', S.colaAsis); }
+let enviandoAsis = false;
+async function enviaColaAsis(){
+  if (enviandoAsis || !S.colaAsis.length || !S.clave) return; enviandoAsis = true;
+  try {
+    for (const it of [...S.colaAsis]){
+      let r;
+      try { r = await rpc('pos_asistencia_marcar', {p_clave: S.clave, p_staff: it.staff, p_pin: it.pin, p_tipo: it.tipo, p_id: it.id, p_hora_tablet: it.hora}); }
+      catch(e){ if (e.code === 'RED') break; r = {ok: false, error: e.message}; }
+      S.colaAsis = S.colaAsis.filter(x => x.id !== it.id); guardaColaAsis();   // el PIN se borra de la tablet en cuanto se envía
+      if (!r.ok){ S.errores.push({ts: Date.now(), fn: 'asistencia', staff: it.staff, msg: `${it.nombre} · ${it.tipo} ${horaAP(it.hora)}: ${r.error}`}); guardaCola(); }
+    }
+  } finally { enviandoAsis = false; }
+  if (!S.ses && !S.chk && S.clave) render();
+}
+setInterval(() => { if (S.colaAsis.length && S.online) enviaColaAsis(); }, 8000);
+addEventListener('online', () => enviaColaAsis());
+
+/* ---------- checador (desde "¿Quién eres?", sin sesión) ---------- */
+let chkT = null, relojT = null;
+function chkReinicia(){ clearTimeout(chkT); chkT = setTimeout(() => { if (S.chk && !S.ses){ S.chk = null; render(); } }, 90000); }   // nadie deja su PIN a medias
+function relojServidor(el, ahoraServidor){
+  clearInterval(relojT); const dif = ahoraServidor ? new Date(ahoraServidor).getTime() - Date.now() : 0;
+  const pinta = () => { if (!el.isConnected){ clearInterval(relojT); return; } el.textContent = horaAP(Date.now() + dif); };
+  pinta(); relojT = setInterval(pinta, 5000);
+}
+function vChecador(){
+  const C = S.chk; chkReinicia();
+  const volver = `<button class="btn ghost block" data-x="chkback" style="margin-top:12px">← ${C.paso === 'nombre' ? 'Volver' : 'Otra persona'}</button>`;
+  app().innerHTML = barra() + `<main><div class="login" id="chk"></div></main>`; pintaSync();
+  const box = $('#chk');
+  if (C.paso === 'nombre'){
+    const lista = (S.personal || []).filter(p => p.rol !== 'admin');
+    const card = p => `<button class="person" data-chk="${esc(p.id)}">${esc(p.nombre)}<small>${p.rol === 'asistencia' ? 'cocina' : p.rol}</small></button>`;
+    box.innerHTML = `<h1>Registrar entrada / salida</h1><p class="muted">Toca tu nombre. Cada quien checa con su propio PIN.</p>
+      <div class="grid people">${lista.filter(p => !p.es_demo).map(card).join('')}</div>
+      ${lista.some(p => p.es_demo) ? `<h3>Personal de prueba <span class="demo">DEMO</span></h3><div class="grid people">${lista.filter(p => p.es_demo).map(card).join('')}</div>` : ''}${volver}`;
+    box.querySelectorAll('[data-chk]').forEach(b => b.onclick = () => { S.chk = {paso: 'pin', p: S.personal.find(x => x.id === b.dataset.chk)}; render(); });
+  } else if (C.paso === 'pin'){
+    box.innerHTML = `<div class="pinbox"><h1>${esc(C.p.nombre)}</h1><p class="muted">Escribe tu PIN para registrar tu entrada o salida</p><div class="dots" id="dots"></div><div class="pad" id="pad"></div><div class="msg" id="pmsg">${esc(C.msg || '')}</div>${volver}</div>`;
+    padPin($('#pad'), $('#dots'), async pin => {
+      if (!S.online){ S.chk = {paso: 'offline', p: C.p, pin}; render(); return true; }
+      const r = await rpc('pos_asistencia_consultar', {p_clave: S.clave, p_staff: C.p.id, p_pin: pin}).catch(e => e);
+      if (r instanceof ApiError){ if (r.code === 'RED'){ S.chk = {paso: 'offline', p: C.p, pin}; render(); return true; } $('#pmsg').textContent = r.message; return false; }
+      if (!r.ok){ $('#pmsg').textContent = r.error; return false; }
+      S.chk = {paso: 'confirmar', p: C.p, pin, est: r}; render(); return true;
+    });
+  } else if (C.paso === 'confirmar'){
+    const e = C.est, ab = e.abierta, ords = e.ordenes_abiertas || [];
+    box.innerHTML = `<div class="card checa"><p class="muted" style="margin:0">${fdate(e.hoy)}</p><h1 style="margin:0">${esc(e.staff.nombre)}</h1>
+      <div class="reloj num" id="reloj"></div><p class="muted small" style="margin:0">Hora del servidor</p>
+      ${e.pendientes.length ? `<div class="banner crit">Tienes ${e.pendientes.length === 1 ? 'una entrada' : e.pendientes.length + ' entradas'} sin salida (${e.pendientes.map(x => `${fdate(x.fecha)} ${horaAP(x.entrada)}`).join(', ')}). Queda como <b>salida pendiente</b>: avísale a la encargada para que la corrija.</div>` : ''}
+      ${ab ? `<p class="estado-chk">Entraste a las <b>${horaAP(ab.entrada)}</b>${e.segundos_hoy ? ` · antes hoy: ${durTxt(e.segundos_hoy)}` : ''}</p>` : `<p class="estado-chk">${e.trabaja_hoy ? `Tu hora de entrada: <b>${esc(e.hora_entrada)}</b>` : 'Hoy no te toca según tu horario.'}</p>`}
+      ${ab && ords.length ? `<div class="banner crit" style="text-align:left">No puedes salir: tienes ${ords.length} orden(es) abierta(s): ${ords.map(o => `<b>#${esc(o.folio)}</b> ${esc(lugarOrden(o))}`).join(', ')}. Cóbralas o pide a la encargada que las reasigne.</div>
+        <button class="btn big block" data-x="reasig">Reasignar órdenes</button>` : ''}
+      <button class="btn ${ab ? 'ok' : 'pri'} big block checabig" data-x="marca" ${ab && ords.length ? 'disabled' : ''}>${ab ? 'Registrar salida' : 'Registrar entrada'}</button>
+      <div class="msg" id="cmsg"></div>${volver}</div>`;
+    relojServidor($('#reloj'), e.ahora);
+    box.querySelector('[data-x="marca"]').onclick = ev => marcaChk(ab ? 'salida' : 'entrada', ev.currentTarget);
+    const rb = box.querySelector('[data-x="reasig"]'); if (rb) rb.onclick = reasignarOrdenes;
+  } else if (C.paso === 'offline'){
+    box.innerHTML = `<div class="card checa"><h1 style="margin:0">${esc(C.p.nombre)}</h1><div class="reloj num" id="reloj"></div><p class="muted small" style="margin:0">Hora de la tablet</p>
+      <div class="banner">Sin internet: tu marca se guarda en la tablet con esta hora y se envía sola cuando vuelva el internet. Quedará marcada como <b>sin conexión</b>.</div>
+      <div class="row"><button class="btn pri big" style="flex:1" data-x="e">Registrar entrada</button><button class="btn ok big" style="flex:1" data-x="s">Registrar salida</button></div>${volver}</div>`;
+    relojServidor($('#reloj'), null);
+    const off = tipo => { const hora = new Date().toISOString();
+      S.colaAsis.push({id: uuid(), staff: C.p.id, nombre: C.p.nombre, pin: C.pin, tipo, hora}); guardaColaAsis();
+      S.chk = {paso: 'listo', p: C.p, res: {ok: true, tipo, hora, nombre: C.p.nombre, sin_conexion: true}}; render(); };
+    box.querySelector('[data-x="e"]').onclick = () => off('entrada'); box.querySelector('[data-x="s"]').onclick = () => off('salida');
+  } else if (C.paso === 'listo'){
+    box.innerHTML = mensajeMarca(C.res) + `<button class="btn pri big block" data-x="fin" style="margin-top:16px">Listo</button>`;
+    box.querySelector('[data-x="fin"]').onclick = () => { S.chk = null; render(); };
+    clearTimeout(chkT); chkT = setTimeout(() => { if (S.chk?.paso === 'listo'){ S.chk = null; render(); } }, 9000);
+  }
+  const bk = box.querySelector('[data-x="chkback"]'); if (bk) bk.onclick = () => { S.chk = C.paso === 'nombre' ? null : {paso: 'nombre'}; render(); };
+}
+function mensajeMarca(r){
+  const n = String(r.nombre || '').replace(/^DEMO /, '');
+  return `<div class="marcaok ${r.tipo}"><div class="ic">${r.tipo === 'entrada' ? '✓' : '👋'}</div>
+    <h1>${r.tipo === 'entrada' ? 'Entrada' : 'Salida'} registrada ${horaAP(r.hora)}, ${r.tipo === 'entrada' ? `¡buen día ${esc(n)}!` : `¡hasta luego ${esc(n)}!`}</h1>
+    ${r.tipo === 'salida' && r.segundos_dia != null ? `<p class="horas">Hoy trabajaste <b>${durTxt(r.segundos_dia)}</b></p>` : ''}
+    ${r.retardo ? `<p class="muted">Llegaste ${r.minutos_tarde} min después de tu hora.</p>` : ''}
+    ${r.pendientes ? '<p class="banner crit" style="margin:0">Tienes una salida pendiente de otro día: avísale a la encargada.</p>' : ''}
+    ${r.sin_conexion ? '<p class="banner" style="margin:0">Guardada sin internet (hora de la tablet). Se enviará sola.</p>' : ''}</div>`;
+}
+async function marcaChk(tipo, btn){
+  const C = S.chk; if (btn) btn.disabled = true;   // sin doble toque
+  const id = uuid();
+  const r = await rpc('pos_asistencia_marcar', {p_clave: S.clave, p_staff: C.p.id, p_pin: C.pin, p_tipo: tipo, p_id: id}).catch(e => e);
+  if (r instanceof ApiError){
+    if (r.code === 'RED'){ const hora = new Date().toISOString(); S.colaAsis.push({id, staff: C.p.id, nombre: C.p.nombre, pin: C.pin, tipo, hora}); guardaColaAsis();
+      S.chk = {paso: 'listo', p: C.p, res: {ok: true, tipo, hora, nombre: C.p.nombre, sin_conexion: true}}; return render(); }
+    $('#cmsg').textContent = r.message; if (btn) btn.disabled = false; return;
+  }
+  if (!r.ok){
+    if (r.codigo === 'ORDENES_ABIERTAS' || r.codigo === 'DOBLE' || r.codigo === 'SIN_ENTRADA'){
+      const e = await rpc('pos_asistencia_consultar', {p_clave: S.clave, p_staff: C.p.id, p_pin: C.pin}).catch(() => null);
+      if (e?.ok){ S.chk = {...C, est: e}; render(); toast(r.error, true); return; }
+    }
+    $('#cmsg').textContent = r.error; if (btn) btn.disabled = false; return;
+  }
+  S.chk = {paso: 'listo', p: C.p, res: r}; render();
+}
+// La encargada o el admin pasan las órdenes abiertas de quien se va a alguien que se queda
+function reasignarOrdenes(){
+  const C = S.chk, e = C.est; let a = null, quien = null;
+  const aut = (S.personal || []).filter(p => (p.rol === 'encargada' || p.rol === 'admin') && p.es_demo === e.staff.es_demo);
+  const draw = msg => {
+    abreModal(`<div class="sheet"><h2 style="margin:0">Reasignar órdenes de ${esc(e.staff.nombre)}</h2>
+      <p class="muted" style="margin:0">${e.ordenes_abiertas.map(o => `#${esc(o.folio)} ${esc(lugarOrden(o))}`).join(' · ')}</p>
+      <div class="grp"><div class="gt">¿A quién se las pasas? <span class="muted small">debe tener su entrada registrada</span></div><div class="opts">${e.pueden_recibir.length ? e.pueden_recibir.map(p => `<button class="opt" data-ra="${esc(p.id)}" aria-pressed="${a === p.id}">${esc(p.nombre)}</button>`).join('') : '<p class="muted">Nadie más tiene entrada registrada.</p>'}</div></div>
+      <div class="grp"><div class="gt">Autoriza <span class="muted small">encargada o administrador</span></div><div class="opts">${aut.map(p => `<button class="opt" data-rq="${esc(p.id)}" aria-pressed="${quien === p.id}">${esc(p.nombre)}</button>`).join('')}</div>
+        <label class="field" style="margin-top:10px">PIN de quien autoriza<input id="rpin" type="password" inputmode="numeric" maxlength="6" autocomplete="off"></label></div>
+      <div class="msg">${esc(msg || '')}</div>
+      <div class="foot"><button class="btn big" data-x="no">Volver</button><button class="btn pri big" data-x="si">Reasignar</button></div></div>`);
+    const d = dlg();
+    d.querySelectorAll('[data-ra]').forEach(b => b.onclick = () => { a = b.dataset.ra; draw(); });
+    d.querySelectorAll('[data-rq]').forEach(b => b.onclick = () => { quien = b.dataset.rq; draw(); });
+    d.querySelector('[data-x="no"]').onclick = cierraModal;
+    d.querySelector('[data-x="si"]').onclick = async () => {
+      const pin = $('#rpin').value; if (!a) return draw('Elige a quién pasarle las órdenes.'); if (!quien) return draw('Elige quién autoriza.'); if (pin.length < 4) return draw('Escribe el PIN.');
+      try { const r = await rpc('pos_reasignar_ordenes', {p_clave: S.clave, p_de: e.staff.id, p_a: a, p_autoriza: quien, p_pin: pin});
+        if (!r.ok) return draw(r.error);
+        cierraModal(); toast(`Órdenes ${r.folios.map(f => '#' + f).join(', ')} pasadas a ${r.a}`);
+        const e2 = await rpc('pos_asistencia_consultar', {p_clave: S.clave, p_staff: C.p.id, p_pin: C.pin}); if (e2.ok){ S.chk = {...C, est: e2}; render(); } }
+      catch(err){ draw(err.message); }
+    };
+  };
+  draw();
+}
+
+/* ---------- entrada obligatoria al entrar al POS (mesero y encargada) ---------- */
+async function vEntrada(){
+  app().innerHTML = barra() + `<main><div class="login" id="ent"><p class="muted">Cargando…</p></div></main>`; pintaSync();
+  let e; try { e = await call('pos_asistencia_mia'); } catch(err){ if (!$('#ent')) return; $('#ent').innerHTML = `<div class="banner crit">${esc(err.message)}</div><button class="btn big" data-act="salir">Salir</button>`; return; }
+  if (!$('#ent')) return;
+  if (e.abierta || !e.requiere_entrada){ return continuarPOS(); }
+  $('#ent').innerHTML = `<div class="card checa" id="entradaObl"><p class="muted" style="margin:0">${fdate(e.hoy)}</p><h1 style="margin:0">Hola, ${esc(e.staff.nombre)}</h1>
+    <p class="estado-chk">Antes de tomar órdenes registra tu entrada.</p>
+    <div class="reloj num" id="reloj"></div><p class="muted small" style="margin:0">Hora del servidor</p>
+    ${e.pendientes.length ? `<div class="banner crit">Tienes una entrada sin salida (${e.pendientes.map(x => `${fdate(x.fecha)} ${horaAP(x.entrada)}`).join(', ')}). Queda como <b>salida pendiente</b>: la encargada o el administrador la corrigen.</div>` : ''}
+    <button class="btn pri big block checabig" id="entOk">Registrar entrada</button><div class="msg" id="emsg"></div>
+    <button class="btn ghost block" data-act="salir">Salir sin registrar</button></div>`;
+  relojServidor($('#reloj'), e.ahora);
+  $('#entOk').onclick = async () => {
+    $('#entOk').disabled = true;
+    try { const r = await call('pos_asistencia_marcar_sesion', {p_tipo: 'entrada', p_id: uuid()});
+      if (!r.ok && r.codigo !== 'DOBLE'){ $('#emsg').textContent = r.error; $('#entOk').disabled = false; return; }
+      if (!r.ok) return continuarPOS();
+      $('#ent').innerHTML = mensajeMarca(r) + '<button class="btn pri big block" id="entSig" style="margin-top:16px">Continuar al POS</button>';
+      $('#entSig').onclick = continuarPOS; }
+    catch(err){ $('#emsg').textContent = err.code === 'RED' ? 'Sin internet: no se pudo registrar. Intenta de nuevo.' : err.message; $('#entOk').disabled = false; }
+  };
+}
+async function continuarPOS(){ S.vista = 'inicio'; await cargaMenu(); render(); sincroniza(); }
+
+/* ---------- quién está hoy (encargada y admin) ---------- */
+async function vAsistenciaHoy(){
+  if (rol() === 'mesero'){ S.vista = 'inicio'; return render(); }
+  app().innerHTML = barra() + `<main><div class="row" style="margin-bottom:10px"><button class="btn" data-act="inicio">← Volver</button><h1 style="margin:0">Quién está hoy</h1>
+    <span class="spacer"></span><button class="btn sm" data-act="asistencia">Actualizar</button></div><div id="asbody"><p class="muted">Cargando…</p></div></main>`; pintaSync();
+  await pintaHoy($('#asbody'), () => vAsistenciaHoy());
+}
+async function pintaHoy(box, recarga, demo){
+  let h; try { h = await call('pos_asistencia_hoy', demo == null ? {} : {p_demo: demo}); } catch(e){ box.innerHTML = `<div class="banner crit">${esc(e.message)}</div>`; return; }
+  if (!box.isConnected) return;
+  const dentro = h.personas.filter(p => p.estado === 'dentro').length;
+  const reg = p => p.registros?.[p.registros.length - 1];
+  box.innerHTML = `${h.avisos.length ? `<div class="banner crit">${h.avisos.map(esc).join('<br>')}</div>` : ''}
+    <div class="row" style="margin-bottom:10px"><span class="tag t-mesa">${dentro} dentro</span><span class="muted small">${fdate(h.fecha)} · tolerancia de retardo ${h.tolerancia} min</span></div>
+    ${h.personas.length ? `<div class="tbl"><table class="asis"><thead><tr><th>Persona</th><th>Estado</th><th>Llegó</th><th>Salió</th><th class="n">Horas</th><th></th></tr></thead><tbody>
+      ${h.personas.map(p => { const [t, c] = ESTADO_ASIS[p.estado] || [p.estado, '']; return `<tr data-per="${esc(p.staff_id)}"><td><b>${esc(p.nombre)}</b><br><span class="muted small">${p.trabaja_hoy ? 'entra ' + esc(p.hora_entrada) : 'descansa hoy'}</span></td>
+        <td><span class="tag ${c}">${t}</span></td>
+        <td>${p.entrada ? horaAP(p.entrada) : '—'}${p.retardo ? ` <span class="tag est-cancelada">${p.minutos_tarde} min tarde</span>` : ''}${p.sin_conexion ? ' <span class="tag pend">sin conexión</span>' : ''}</td>
+        <td>${p.salida && !p.dentro ? horaAP(p.salida) : '—'}</td><td class="n">${p.segundos ? durTxt(p.segundos) : '—'}</td>
+        <td>${reg(p) ? `<button class="btn sm" data-cor="${esc(reg(p).id)}" data-nom="${esc(p.nombre)}">Corregir</button>` : ''}</td></tr>`; }).join('')}</tbody></table></div>`
+      : '<div class="empty">No hay personal registrado para checar.</div>'}
+    <h3>Salidas pendientes</h3>${h.pendientes.length ? `<div class="paylist">${h.pendientes.map(x => `<div class="payrow" style="align-items:center;gap:10px"><span>${esc(x.nombre)} · entró ${fdate(x.fecha)} ${horaAP(x.entrada)} y no registró salida</span>
+        <button class="btn sm" data-cor="${esc(x.id)}" data-nom="${esc(x.nombre)}">Corregir</button></div>`).join('')}</div>` : '<p class="muted" style="margin:0">Ninguna.</p>'}
+    ${h.sin_pin?.length ? `<p class="note">Sin PIN para checar: <b>${h.sin_pin.map(esc).join(', ')}</b>. ${rol() === 'admin' ? 'Dalos de alta en Panel › Personal.' : 'Pídele a Guillermo que les dé su PIN.'}</p>` : ''}`;
+  const regs = {}; h.personas.forEach(p => (p.registros || []).forEach(r => regs[r.id] = {...r, fecha: h.fecha}));
+  h.pendientes.forEach(x => regs[x.id] = {id: x.id, entrada: x.entrada, salida: null, fecha: x.fecha});
+  box.querySelectorAll('[data-cor]').forEach(b => b.onclick = () => corregirAsistencia(regs[b.dataset.cor], b.dataset.nom, recarga));
+}
+// Corregir entrada / salida (encargada o admin), con motivo. El servidor guarda antes, después, quién y cuándo.
+function corregirAsistencia(r, nombre, despues){
+  let motivo = ''; const fecha = r.fecha || hoyISO();
+  const MOT = ['Se le olvidó checar la salida', 'Hora equivocada', 'Falla de internet'];
+  const draw = msg => {
+    abreModal(`<div class="sheet"><h2 style="margin:0">Corregir asistencia</h2><p class="muted" style="margin:0">${esc(nombre)} · ${fdate(fecha)}</p>
+      <div class="grid" style="grid-template-columns:1fr 1fr;gap:10px">
+        <label class="field">Entrada<input type="time" id="core" class="big num" value="${esc(hhmmMty(r.entrada))}"></label>
+        <label class="field">Salida<input type="time" id="cors" class="big num" value="${esc(hhmmMty(r.salida))}"></label></div>
+      <p class="muted small" style="margin:0">Registrado: entrada ${r.entrada ? horaAP(r.entrada) : '—'} · salida ${r.salida ? horaAP(r.salida) : 'sin salida'}</p>
+      <div class="grp"><div class="gt">Motivo <span class="muted small">obligatorio</span></div><div class="chips">${MOT.map(m => `<button class="chip" data-mot="${esc(m)}" aria-pressed="${motivo === m}">${esc(m)}</button>`).join('')}</div>
+        <input id="cormot" style="margin-top:8px;font:17px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg);width:100%" maxlength="200" placeholder="Otro motivo…"></div>
+      <p class="note" style="margin:0">No se borra nada: queda guardado el valor anterior, quién corrigió y cuándo.</p>
+      <div class="msg">${esc(msg || '')}</div>
+      <div class="foot"><button class="btn big" data-x="no">Cancelar</button><button class="btn pri big" data-x="si">Guardar corrección</button></div></div>`);
+    const d = dlg();
+    d.querySelectorAll('[data-mot]').forEach(b => b.onclick = () => { const e1 = $('#core').value, s1 = $('#cors').value; motivo = b.dataset.mot; draw(); $('#core').value = e1; $('#cors').value = s1; });
+    d.querySelector('[data-x="no"]').onclick = cierraModal;
+    d.querySelector('[data-x="si"]').onclick = async () => {
+      const ne = $('#core').value, ns = $('#cors').value, mot = $('#cormot').value.trim() || motivo;
+      if (mot.length < 3) return draw('Elige o escribe el motivo.');
+      const pe = ne && ne !== hhmmMty(r.entrada) ? isoMty(fecha, ne) : null;
+      const ps = ns && ns !== hhmmMty(r.salida) ? isoMty(fecha, ns) : null;
+      if (!pe && !ps) return draw('Cambia la hora de entrada o de salida.');
+      try { await call('pos_asistencia_corregir', {p_id: r.id, p_entrada: pe, p_salida: ps, p_motivo: mot}); cierraModal(); toast('Corrección guardada'); if (despues) despues(); }
+      catch(e){ draw(e.message); }
+    };
+  };
+  draw();
+}
+
+/* ---------- Panel › Asistencia (admin) ---------- */
+let asisVista = 'hoy', asisDia = null, asisFin = null;
+function finSemana(dia){ // último día de la semana de pago (el día de pago) que contiene hoy
+  const h = new Date(hoyISO() + 'T12:00:00'); const t = DSEM.indexOf(dia); const k = (t - h.getDay() + 7) % 7; return addDays(hoyISO(), k);
+}
+async function aAsistencia(){
+  const A = S.admin;
+  const emp = A.emp || await call('admin_empleados').catch(() => []); A.emp = emp;
+  const diasPago = [...new Set(emp.filter(e => e.activo).map(e => e.dia_pago))];
+  if (!asisDia) asisDia = diasPago.includes('Dom') ? 'Dom' : (diasPago[0] || 'Dom');
+  if (!asisFin) asisFin = finSemana(asisDia);
+  $('#abody').innerHTML = `<div class="row" style="margin-bottom:12px">${[['hoy','Hoy'],['semana','Semana'],['correcciones','Correcciones']].map(([k, l]) => `<button class="chip" data-av="${k}" aria-pressed="${asisVista === k}">${l}</button>`).join('')}</div><div id="avbody"><p class="muted">Cargando…</p></div>`;
+  app().querySelectorAll('[data-av]').forEach(b => b.onclick = () => { asisVista = b.dataset.av; aAsistencia(); });
+  const box = $('#avbody');
+  if (asisVista === 'hoy') return pintaHoy(box, () => aAsistencia(), A.demo);
+  if (asisVista === 'correcciones'){
+    const co = await call('admin_asistencia_correcciones', {p_desde: addDays(hoyISO(), -60), p_hasta: hoyISO(), p_demo: A.demo});
+    if (!box.isConnected) return;
+    const ah = v => v ? horaAP(v) : 'sin salida';
+    box.innerHTML = `<p class="muted" style="margin-top:0">Últimos 60 días. Nada se borra: cada corrección guarda el valor anterior.</p>${tabla([['Cuándo', x => ftime(x.cuando)], ['Corrigió', x => esc(x.por)], ['Persona', x => esc(x.persona)], ['Día', x => fdate(x.fecha)],
+      ['Antes', x => `${ah(x.antes.entrada)} – ${ah(x.antes.salida)}`], ['Después', x => `<b>${ah(x.despues.entrada)} – ${ah(x.despues.salida)}</b>`], ['Motivo', x => esc(x.motivo), 'w']], co, 'Sin correcciones.')}`;
+    return;
+  }
+  const desde = addDays(asisFin, -6);
+  const w = await call('admin_asistencia', {p_desde: desde, p_hasta: asisFin, p_demo: A.demo});
+  if (!box.isConnected) return;
+  const quien = emp.filter(e => e.dia_pago === asisDia).map(e => e.id);
+  // Semana de pago: quienes cobran ese día (por su ficha de Nómina). El personal DEMO no tiene ficha: se muestra siempre en modo demo.
+  const per = w.personas.filter(p => asisDia === 'todos' || (p.empleado_id ? quien.includes(p.empleado_id) : A.demo));
+  box.innerHTML = `<div class="card row" style="margin-bottom:10px"><span class="small">Semana de pago:</span>
+      <select id="asdia" class="cell w">${[...diasPago, 'todos'].map(d => `<option value="${d}" ${d === asisDia ? 'selected' : ''}>${d === 'todos' ? 'Todos' : 'se paga el ' + ({Dom:'domingo',Lun:'lunes',Mar:'martes','Mié':'miércoles',Jue:'jueves',Vie:'viernes','Sáb':'sábado'}[d] || d)}${d !== 'todos' ? ' (' + emp.filter(e => e.activo && e.dia_pago === d).map(e => e.nombre).join(', ') + ')' : ''}</option>`).join('')}</select>
+      <button class="btn sm" id="asprev">◀</button><b>${fdate(desde)} – ${fdate(asisFin)}</b><button class="btn sm" id="asnext">▶</button></div>
+    ${w.pendientes.length ? `<div class="banner crit">Salidas pendientes: ${w.pendientes.map(x => `${esc(x.nombre)} (${fdate(x.fecha)})`).join(', ')}</div>` : ''}
+    ${per.length ? `<div class="tbl"><table class="asis"><thead><tr><th>Persona</th><th class="n">Días</th><th class="n">Horas</th><th class="n">Retardos</th><th class="n">Faltas</th><th class="n">Salidas pend.</th><th class="n">Sin conexión</th></tr></thead><tbody>
+      ${per.map(p => `<tr class="odrow" data-asp="${esc(p.staff_id)}"><td><b>${esc(p.nombre)}</b> <span class="muted small">ver días ▸</span></td><td class="n">${p.trabajados} de ${p.programados}</td><td class="n">${durTxt(p.segundos)}</td>
+        <td class="n ${p.retardos ? 'neg' : ''}">${p.retardos}${p.minutos_tarde ? ` <span class="muted small">(${p.minutos_tarde} min)</span>` : ''}</td><td class="n ${p.faltas ? 'neg' : ''}">${p.faltas}</td><td class="n ${p.pendientes ? 'neg' : ''}">${p.pendientes}</td><td class="n">${p.sin_conexion}</td></tr>`).join('')}</tbody></table></div>`
+      : '<div class="empty">Nadie con PIN de asistencia en esta semana de pago. Enlaza a cada persona con su ficha de Nómina en Panel › Personal.</div>'}
+    <p class="note">Faltas y retardos se cuentan desde ${fdate(w.asistencia_desde)} (cuando empezó la asistencia). Retardo = más de ${w.tolerancia} min después de su hora de entrada.</p>
+    <div id="asdet"></div>`;
+  $('#asdia').onchange = () => { asisDia = $('#asdia').value; if (asisDia !== 'todos') asisFin = finSemana(asisDia); aAsistencia(); };
+  $('#asprev').onclick = () => { asisFin = addDays(asisFin, -7); aAsistencia(); };
+  $('#asnext').onclick = () => { asisFin = addDays(asisFin, 7); aAsistencia(); };
+  box.querySelectorAll('[data-asp]').forEach(tr => tr.onclick = () => {
+    const p = w.personas.find(x => x.staff_id === tr.dataset.asp); const regs = {};
+    $('#asdet').innerHTML = `<h3>${esc(p.nombre)} · día por día</h3>${tabla([['Día', d => fdate(d.fecha)], ['Entrada', d => d.registros.map(r => horaAP(r.entrada) + (r.origen_entrada === 'sin_conexion' ? ' <span class="tag pend">sin conexión</span>' : '')).join('<br>') || (d.falta ? '<span class="tag est-cancelada">Falta</span>' : d.programado ? '—' : '<span class="muted">descanso</span>')],
+      ['Salida', d => d.registros.map(r => r.salida ? horaAP(r.salida) + (r.origen_salida === 'sin_conexion' ? ' <span class="tag pend">sin conexión</span>' : r.origen_salida === 'correccion' ? ' <span class="tag">corregida</span>' : '') : '<span class="tag est-cancelada">pendiente</span>').join('<br>') || '—'],
+      ['Horas', d => d.segundos ? durTxt(d.segundos) : '—', 'n'], ['Retardo', d => d.minutos_tarde ? d.minutos_tarde + ' min' : '—', 'n'],
+      ['', d => d.registros.map(r => { regs[r.id] = {...r, fecha: d.fecha}; return `<button class="btn sm" data-cor="${esc(r.id)}">Corregir</button>`; }).join(' ')]], p.dias)}`;
+    $('#asdet').querySelectorAll('[data-cor]').forEach(b => b.onclick = () => corregirAsistencia(regs[b.dataset.cor], p.nombre, () => aAsistencia()));
+    $('#asdet').scrollIntoView({behavior: 'smooth', block: 'start'});
+  });
+}
+const DLETRA = ['D','L','M','M','J','V','S'];
+const horarioTxt = e => `${(e.dias_trabajo || []).length === 7 ? 'Todos los días' : (e.dias_trabajo || []).map(d => DSEM[d]).join(', ')} · ${e.hora_entrada || '—'}`;
 
 /* ================= ADMINISTRADOR ================= */
 function rango(k){
@@ -997,7 +1393,7 @@ function rango(k){
 async function vAdmin(){
   const A = S.admin; if (!A.desde) [A.desde, A.hasta] = rango('semana');
   if (rol() !== 'admin'){ S.vista = 'inicio'; return render(); }
-  const tabs = [['resumen','Ventas'],['resultado','Resultado'],['productos','Por producto'],['costos','Costos y ganancia'],['gastos','Gastos'],['nomina','Nómina'],['marketing','Marketing'],['inventario','Inventario'],['recetas','Recetas'],['cortes','Cortes'],['bitacora','Bitácora'],['personal','Personal'],['menu','Menú y precios'],['ajustes','Ajustes']];
+  const tabs = [['resumen','Ventas'],['resultado','Resultado'],['productos','Por producto'],['costos','Costos y ganancia'],['gastos','Gastos'],['nomina','Nómina'],['asistencia','Asistencia'],['marketing','Marketing'],['inventario','Inventario'],['recetas','Recetas'],['cortes','Cortes'],['bitacora','Bitácora'],['personal','Personal'],['menu','Menú y precios'],['ajustes','Ajustes']];
   app().innerHTML = barra() + `<main><div class="row" style="margin-bottom:6px"><button class="btn" data-act="inicio">← POS</button><h1 style="margin:0">Panel de ventas</h1></div>
     <nav class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" aria-current="${A.tab === k}">${l}</button>`).join('')}</nav>
     ${['resumen','productos','cortes','bitacora','costos','resultado','gastos'].includes(A.tab) ? `<div class="row" style="margin-bottom:12px">
@@ -1012,11 +1408,20 @@ async function vAdmin(){
   if (dh) dh.onchange = () => { A.hasta = dh.value; if (A.hasta < A.desde) A.desde = A.hasta; A.rep = A.bit = null; vAdmin(); };
   if (vd) vd.onchange = () => { A.demo = vd.checked; A.rep = A.bit = null; vAdmin(); };
   if (!A.respChk){ A.respChk = true; call('admin_config').then(c => { A.ultResp = c.ultimo_respaldo || null; if (S.vista === 'admin') pintaRecordatorio(); }).catch(() => {}); } else pintaRecordatorio();
-  try { await ({resumen: aResumen, resultado: aResultado, gastos: aGastos, nomina: aNomina, marketing: aMarketing, productos: aProductos, inventario: aInventario, recetas: aRecetas, costos: aCostos, cortes: aCortes, bitacora: aBitacora, personal: aPersonal, menu: aMenu, ajustes: aAjustes}[A.tab])(); }
+  try { await ({resumen: aResumen, resultado: aResultado, gastos: aGastos, nomina: aNomina, asistencia: aAsistencia, marketing: aMarketing, productos: aProductos, inventario: aInventario, recetas: aRecetas, costos: aCostos, cortes: aCortes, bitacora: aBitacora, personal: aPersonal, menu: aMenu, ajustes: aAjustes}[A.tab])(); }
   catch(e){ $('#abody').innerHTML = `<div class="banner crit">${esc(e.message)}</div>`; }
 }
 function pintaRecordatorio(){
   const A = S.admin;
+  if (!A.asisAv || Date.now() - A.asisAv.ts > 60000 || A.asisAv.demo !== A.demo){
+    A.asisAv = {ts: Date.now(), demo: A.demo, avisos: A.asisAv?.avisos || []};
+    call('pos_asistencia_hoy', {p_demo: A.demo}).then(h => { A.asisAv.avisos = h.avisos || []; $('#asisrec')?.remove(); if (S.vista === 'admin') pintaRecordatorio(); }).catch(() => {});
+  }
+  if (A.asisAv.avisos.length && !$('#asisrec')){
+    const el = document.createElement('div'); el.className = 'banner crit'; el.id = 'asisrec';
+    el.innerHTML = `Asistencia: ${A.asisAv.avisos.map(esc).join(' · ')} <button class="btn sm" id="asisver">Ver asistencia</button>`;
+    const nav = $('.tabs'); if (nav){ nav.after(el); $('#asisver').onclick = () => { A.tab = 'asistencia'; asisVista = 'hoy'; vAdmin(); }; }
+  }
   if (A.emp === undefined){ A.emp = null; call('admin_empleados').then(e => { A.emp = e; if (S.vista === 'admin') pintaRecordatorio(); }).catch(() => {}); }
   if (A.emp && !$('#nomrec')){
     const hoyD = DSEM[new Date().getDay()], manD = DSEM[(new Date().getDay() + 1) % 7];
@@ -1102,9 +1507,10 @@ async function aBitacora(){
 }
 async function aPersonal(){
   const A = S.admin; A.per = await call('admin_personal');
+  if (!$('#abody') || A.tab !== 'personal') return;
   $('#abody').innerHTML = `<div class="row" style="margin-bottom:12px"><button class="btn pri" id="pnew">+ Agregar persona</button></div>
-    ${tabla([['Nombre', x => esc(x.nombre) + (x.es_demo ? ' <span class="demo">DEMO</span>' : '')], ['Rol', x => x.rol], ['Estado', x => x.activo ? 'Activo' : 'Baja'], ['Bloqueo', x => x.bloqueado ? `<b class="neg">Bloqueado</b> <button class="btn sm" data-unl="${esc(x.id)}">Desbloquear</button>` : (x.intentos ? x.intentos + ' intento(s) fallido(s)' : '—')], ['', x => `<button class="btn sm" data-ped="${esc(x.id)}">Editar</button>`]], A.per)}
-    <p class="note">Mesero: PIN de 4 a 6 dígitos. Encargada y administrador: 6 dígitos. Nadie puede ver un PIN: solo se cambia. Dar de baja o cambiar el PIN cierra la sesión de esa persona.</p>
+    ${tabla([['Nombre', x => esc(x.nombre) + (x.es_demo ? ' <span class="demo">DEMO</span>' : '')], ['Rol', x => ROL_TXT[x.rol] || x.rol], ['Nómina', x => x.empleado ? esc(x.empleado) : (x.rol === 'admin' ? '—' : '<span class="muted small">sin enlazar</span>')], ['Estado', x => x.activo ? 'Activo' : 'Baja'], ['Bloqueo', x => x.bloqueado ? `<b class="neg">Bloqueado</b> <button class="btn sm" data-unl="${esc(x.id)}">Desbloquear</button>` : (x.intentos ? x.intentos + ' intento(s) fallido(s)' : '—')], ['', x => `<button class="btn sm" data-ped="${esc(x.id)}">Editar</button>`]], A.per)}
+    <p class="note">Mesero y solo asistencia: PIN de 4 a 6 dígitos. Encargada y administrador: 6 dígitos. “Solo asistencia” (cocina) solo puede registrar entrada y salida: no entra al POS ni ve órdenes, precios ni ventas. Enlaza a cada persona con su ficha de Nómina para que su asistencia cuente en la nómina. Nadie puede ver un PIN: solo se cambia. Dar de baja o cambiar el PIN cierra la sesión de esa persona.</p>
     ${A.per.some(p => p.es_demo) && !esDemo() ? `<div class="card" style="margin-top:16px"><h2>Datos de prueba</h2><p class="muted">Borra el personal DEMO con todas sus órdenes, cobros, cortes y bitácora. Los datos reales no se tocan.</p><button class="btn" id="bdemo" style="border-color:var(--crit);color:var(--crit)">Borrar datos demo</button></div>` : ''}`;
   app().querySelectorAll('[data-unl]').forEach(b => b.onclick = async () => { await call('admin_desbloquear', {p_staff: b.dataset.unl}); toast('Desbloqueado'); aPersonal(); });
   app().querySelectorAll('[data-ped]').forEach(b => b.onclick = () => formPersona(A.per.find(p => p.id === b.dataset.ped)));
@@ -1112,17 +1518,23 @@ async function aPersonal(){
   const bd = $('#bdemo'); if (bd) bd.onclick = async () => { if (!bd.dataset.sure){ bd.dataset.sure = 1; bd.textContent = '¿Seguro? Toca otra vez'; return; }
     try { const r = await call('admin_borrar_demo'); toast(`Datos demo borrados (${r.ordenes_borradas} órdenes)`); S.admin.rep = S.admin.bit = null; aPersonal(); } catch(e){ toast(e.message, true); } };
 }
-function formPersona(p){
+const ROL_TXT = {mesero: 'mesero', encargada: 'encargada', admin: 'administrador', asistencia: 'solo asistencia'};
+async function formPersona(p){
+  const emp = (await call('admin_empleados').catch(() => [])).filter(e => e.activo);
+  const sugerido = p?.empleado_id || null;
   abreModal(`<div class="sheet"><h2>${p ? 'Editar' : 'Nueva'} persona</h2>
     <label class="field">Nombre<input id="fn" maxlength="40" value="${esc(p?.nombre || '')}"></label>
-    <label class="field">Rol<select id="fr">${['mesero','encargada','admin'].map(r => `<option value="${r}" ${p?.rol === r ? 'selected' : ''}>${r === 'admin' ? 'administrador' : r}</option>`).join('')}</select></label>
+    <label class="field">Rol<select id="fr">${['mesero','encargada','asistencia','admin'].map(r => `<option value="${r}" ${p?.rol === r ? 'selected' : ''}>${r === 'asistencia' ? 'solo asistencia (cocina: solo checa entrada y salida)' : ROL_TXT[r]}</option>`).join('')}</select></label>
+    <label class="field">Ficha de Nómina (para la asistencia)<select id="fe"><option value="">— ninguna —</option>${emp.map(e => `<option value="${esc(e.id)}" ${sugerido === e.id ? 'selected' : ''}>${esc(e.nombre)} · ${esc(e.puesto || '')}${e.staff && e.staff.id !== p?.id ? ' (ya enlazada con ' + esc(e.staff.nombre) + ')' : ''}</option>`).join('')}</select></label>
     <label class="field">${p ? 'PIN nuevo (vacío = no cambiar)' : 'PIN'}<input id="fp" type="password" inputmode="numeric" maxlength="6" autocomplete="new-password"></label>
     <label class="row"><input type="checkbox" id="fa" ${!p || p.activo ? 'checked' : ''} style="width:22px;height:22px"> Activo</label>
     <div class="foot"><button class="btn big" data-x="no">Cancelar</button><button class="btn pri big" data-x="si">Guardar</button></div></div>`);
   dlg().querySelector('[data-x="no"]').onclick = cierraModal;
+  if (!p) $('#fn').oninput = () => { const e = emp.find(x => x.nombre.trim().toLowerCase() === $('#fn').value.trim().toLowerCase() && !x.staff); if (e) $('#fe').value = e.id; };
   dlg().querySelector('[data-x="si"]').onclick = async () => {
-    try { await call('admin_personal_guardar', {p_id: p?.id || null, p_nombre: $('#fn').value, p_rol: $('#fr').value, p_activo: $('#fa').checked, p_pin: $('#fp').value || null});
-      cierraModal(); toast('Guardado'); S.personal = await rpc('pos_personal', {p_clave: S.clave}); aPersonal(); }
+    try { const r = await call('admin_personal_guardar', {p_id: p?.id || null, p_nombre: $('#fn').value, p_rol: $('#fr').value, p_activo: $('#fa').checked, p_pin: $('#fp').value || null});
+      const fe = $('#fe').value || null; if (fe !== (p?.empleado_id || null)) await call('admin_personal_enlazar', {p_staff: r.id, p_empleado: fe});
+      S.admin.emp = undefined; cierraModal(); toast('Guardado'); S.personal = await rpc('pos_personal', {p_clave: S.clave}); aPersonal(); }
     catch(e){ toast(e.message, true); }
   };
 }
@@ -1182,6 +1594,19 @@ async function aAjustes(){
       <label class="field">Apertura<textarea id="ra" rows="6" style="font:16px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg)">${esc(((c.rutina_items || {}).apertura || []).join('\n'))}</textarea></label>
       <label class="field">Cierre<textarea id="rc" rows="6" style="font:16px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg)">${esc(((c.rutina_items || {}).cierre || []).join('\n'))}</textarea></label>
       <button class="btn pri" id="sv6">Guardar</button></div>
+    <div class="card grid" id="cimp"><h2>Impresora de tickets</h2>
+      <label class="field">Ancho del rollo<select id="iancho" class="cell w"><option value="80" ${Number(c.ticket_ancho_mm ?? 80) === 80 ? 'selected' : ''}>80 mm (48 letras por renglón)</option><option value="58" ${Number(c.ticket_ancho_mm) === 58 ? 'selected' : ''}>58 mm (32 letras por renglón)</option></select></label>
+      <label class="row"><input type="checkbox" id="iauto" ${c.imprimir_auto_cuenta !== false ? 'checked' : ''} style="width:22px;height:22px"> Imprimir automáticamente al pedir la cuenta</label>
+      <label class="row"><input type="checkbox" id="icobro" ${c.imprimir_al_cobrar === true ? 'checked' : ''} style="width:22px;height:22px"> Imprimir también el ticket al cobrar</label>
+      <p class="muted small" style="margin:0">El encabezado y el pie del ticket se cambian en “Cobro y ticket”. Para que imprima sin preguntar, abre el POS con el acceso directo de Chrome de la guía GUIA_IMPRESORA.</p>
+      <div class="row"><button class="btn pri" id="sv8">Guardar</button><button class="btn" id="iprueba">Imprimir ticket de prueba</button></div></div>
+    <div class="card grid"><h2>Asistencia</h2>
+      <label class="field">Tolerancia de retardo (minutos)<input id="atol" class="cell" inputmode="numeric" value="${esc(c.tolerancia_retardo_min ?? 10)}"></label>
+      <label class="field">Hora de entrada general (si la persona no tiene ficha de Nómina)<input type="time" id="ahe" class="cell w" value="${esc(c.hora_entrada_default || '09:30')}"></label>
+      <div class="row"><label class="field">Abre el local<input type="time" id="aab" class="cell w" value="${esc(c.horario_local?.abre || '10:00')}"></label><label class="field">Cierra<input type="time" id="aci" class="cell w" value="${esc(c.horario_local?.cierra || '18:00')}"></label></div>
+      <label class="field">Aviso de faltas en el Panel a partir de<input type="time" id="aav" class="cell w" value="${esc(c.aviso_falta_hora || '10:15')}"></label>
+      <p class="muted small" style="margin:0">Los días de trabajo y la hora de entrada de cada persona se cambian en Nómina › Editar.</p>
+      <button class="btn pri" id="sv7">Guardar</button></div>
     <div class="card grid"><h2>Respaldo</h2><p class="muted" style="margin:0">Descarga toda la información (ventas, cortes, inventario, recetas, personal sin PIN) en un archivo. Hazlo cada semana y guárdalo en tu computadora o en la nube.</p>
       <p style="margin:0">Último respaldo: <b>${c.ultimo_respaldo ? ftime(c.ultimo_respaldo) : 'nunca'}</b></p>
       <button class="btn pri" id="bresp">Descargar respaldo</button></div>
@@ -1195,6 +1620,11 @@ async function aAjustes(){
   $('#sv4').onclick = () => ok(async () => { await g('propinas_activas', $('#cprop').checked); await g('iva_incluido', $('#civa').checked); await g('ticket_encabezado', $('#cte').value.trim()); await g('ticket_pie', $('#ctp').value.trim());
     Object.assign(S.ses.config, {propinas_activas: $('#cprop').checked, ticket_encabezado: $('#cte').value.trim(), ticket_pie: $('#ctp').value.trim()}); });
   $('#bresp').onclick = respaldo;
+  $('#sv8').onclick = () => ok(async () => { const v = {ticket_ancho_mm: Number($('#iancho').value), imprimir_auto_cuenta: $('#iauto').checked, imprimir_al_cobrar: $('#icobro').checked};
+    for (const [k, x] of Object.entries(v)) await g(k, x); Object.assign(S.ses.config, v); });
+  $('#iprueba').onclick = () => { S.ses.config.ticket_ancho_mm = Number($('#iancho').value); imprimir('prueba', {}); };
+  $('#sv7').onclick = () => ok(async () => { await g('tolerancia_retardo_min', Number($('#atol').value)); await g('hora_entrada_default', $('#ahe').value);
+    await g('horario_local', {abre: $('#aab').value, cierra: $('#aci').value}); await g('aviso_falta_hora', $('#aav').value); });
   $('#sv5').onclick = () => ok(async () => { await g('comision_apps', {rappi: Number($('#co_rappi').value) || 0, didi: Number($('#co_didi').value) || 0, uber: Number($('#co_uber').value) || 0});
     await g('comision_tarjeta', Number($('#co_t').value) || 0); await g('comision_apps_confirmada', $('#co_ok').checked); await g('iva_en_resultado', $('#co_iva').checked); });
   $('#sv6').onclick = () => ok(async () => { const sp = id => $(id).value.split('\n').map(x => x.trim()).filter(Boolean).slice(0, 15); await g('rutina_items', {apertura: sp('#ra'), cierre: sp('#rc')}); });
@@ -1385,29 +1815,45 @@ async function aNomina(){
   $('#abody').innerHTML = `<div class="row" style="margin-bottom:12px">${dias.map(d => { const f = proximoDia(d); return `<button class="chip" data-nf="${f}" aria-pressed="${f === nomFecha}">${fdate(f)}</button>`; }).join('')}
       <input type="date" id="nfd" class="cell w" value="${nomFecha}"><span class="muted small">Día de pago</span></div>
     <h3 style="margin-top:0">Nómina del ${fdate(nomFecha)} ${pagada ? '<span class="tag t-mesa">pagada</span>' : ''}</h3>
-    ${n.lineas.length ? `<div class="tbl"><table><thead><tr><th>Persona</th><th class="n">Pago semanal</th><th class="n">Días</th><th class="n">Extras $</th><th class="n">Bonos $</th><th class="n">Adelantos $</th><th class="n">Total</th></tr></thead><tbody>
-      ${n.lineas.map((l, i) => `<tr><td><b>${esc(l.nombre)}</b><br><span class="muted small">${esc(l.puesto || '')}</span></td><td class="n">${money(l.base)}</td>
+    ${n.lineas.some(l => l.asistencia?.pendientes > 0 && !l.pagado) ? `<div class="banner crit">Hay salidas pendientes en esta semana (${n.lineas.filter(l => l.asistencia?.pendientes > 0).map(l => esc(l.nombre)).join(', ')}). Corrígelas en la pestaña Asistencia antes de pagar.</div>` : ''}
+    ${n.lineas.length ? `<div class="tbl"><table><thead><tr><th>Persona</th><th class="n">Pago semanal</th><th>Asistencia ${fdate(n.desde)} – ${fdate(nomFecha)}</th><th class="n">Días</th><th class="n">Extras $</th><th class="n">Bonos $</th><th class="n">Adelantos $</th><th class="n">Total</th></tr></thead><tbody>
+      ${n.lineas.map((l, i) => `<tr><td><b>${esc(l.nombre)}</b><br><span class="muted small">${esc(l.puesto || '')}</span></td><td class="n">${money(l.base)}</td><td class="nasis">${asisNomina(l)}</td>
         ${['dias','extras','bonos','adelantos'].map(k => `<td class="n"><input class="cell" data-nl="${i}" data-k="${k}" inputmode="decimal" value="${esc(l[k])}" style="width:80px" ${l.pagado ? 'disabled' : ''}></td>`).join('')}
         <td class="n"><b id="nt${i}">${money(l.total)}</b></td></tr>`).join('')}
-      <tr><td colspan="6"><b>Total a pagar</b></td><td class="n"><b id="ntt"></b></td></tr></tbody></table></div>
+      <tr><td colspan="7"><b>Total a pagar</b></td><td class="n"><b id="ntt"></b></td></tr></tbody></table></div>
       ${pagada ? '<p class="note">Esta nómina ya se marcó como pagada.</p>' : `<div class="row" style="margin-top:10px"><button class="btn" id="nsv">Guardar borrador</button><button class="btn pri" id="npg">Marcar como pagada</button></div>`}
-      <p class="note">Total = pago semanal × días ÷ 7 + extras + bonos − adelantos. 7 días = semana completa. No incluye IMSS ni ISR: pásale el total a tu contador.</p>`
+      <p class="note">“Días” se prellena con la asistencia real (puedes cambiarlo). Total = pago semanal × días trabajados ÷ días que le tocaban + extras + bonos − adelantos. Si trabajó todos sus días, cobra la semana completa. No incluye IMSS ni ISR: pásale el total a tu contador.</p>`
       : '<div class="empty">Nadie cobra ese día.</div>'}
-    <div class="two" style="margin-top:16px"><div><h3>Personal y pago semanal</h3>${tabla([['Nombre', e => `<b>${esc(e.nombre)}</b>${e.activo ? '' : ' <span class="tag">baja</span>'}<br><span class="muted small">${esc(e.puesto || '')}</span>`], ['Paga', e => e.dia_pago], ['Pago semanal', e => money(e.pago_semanal), 'n'], ['', e => `<button class="btn sm" data-ee="${esc(e.id)}">Editar</button>`]], emp)}
+    <div class="two" style="margin-top:16px"><div><h3>Personal y pago semanal</h3>${tabla([['Nombre', e => `<b>${esc(e.nombre)}</b>${e.activo ? '' : ' <span class="tag">baja</span>'}<br><span class="muted small">${esc(e.puesto || '')}</span>`], ['Paga', e => e.dia_pago], ['Pago semanal', e => money(e.pago_semanal), 'n'],
+      ['Horario', e => `<span class="small">${esc(horarioTxt(e))}</span>`], ['Checa con PIN', e => e.staff ? `<span class="small">${esc(e.staff.nombre)} · ${esc(ROL_TXT[e.staff.rol] || e.staff.rol)}</span>` : '<span class="tag pend">falta PIN</span>'], ['', e => `<button class="btn sm" data-ee="${esc(e.id)}">Editar</button>`]], emp)}
       <div class="row" style="margin-top:8px"><button class="btn" id="enew">+ Persona</button><span class="muted small">Nómina mensual: <b>${money(Math.round(emp.filter(e => e.activo).reduce((a, e) => a + Number(e.pago_semanal), 0) * 4.33))}</b></span></div></div>
     <div><h3>Pagos anteriores</h3>${tabla([['Fecha', h => fdate(h.fecha_pago)], ['Personas', h => h.personas, 'n'], ['Total', h => money(h.total), 'n'], ['Estado', h => h.pagado ? 'Pagada' : '<span class="tag pend">borrador</span>'], ['', h => `<button class="btn sm" data-nh="${h.fecha_pago}">Ver</button>`]], n.historial, 'Todavía no hay nóminas registradas.')}</div></div>`;
   const lineas = n.lineas.map(l => ({...l}));
-  const recalc = () => { let t = 0; lineas.forEach((l, i) => { const tot = r2(Number(l.base) * Number(l.dias) / 7 + Number(l.extras || 0) + Number(l.bonos || 0) - Number(l.adelantos || 0)); l.total = tot; t += tot; const el = $('#nt' + i); if (el) el.textContent = money(tot); }); const tt = $('#ntt'); if (tt) tt.textContent = money(t); };
+  const recalc = () => { let t = 0; lineas.forEach((l, i) => { const tot = r2(Number(l.base) * Number(l.dias) / (Number(l.dias_prog) || 7) + Number(l.extras || 0) + Number(l.bonos || 0) - Number(l.adelantos || 0)); l.total = tot; t += tot; const el = $('#nt' + i); if (el) el.textContent = money(tot); }); const tt = $('#ntt'); if (tt) tt.textContent = money(t); };
   app().querySelectorAll('[data-nl]').forEach(i => i.oninput = () => { lineas[Number(i.dataset.nl)][i.dataset.k] = i.value === '' ? 0 : Number(i.value); recalc(); });
   recalc();
   app().querySelectorAll('[data-nf]').forEach(b => b.onclick = () => { nomFecha = b.dataset.nf; aNomina(); });
   app().querySelectorAll('[data-nh]').forEach(b => b.onclick = () => { nomFecha = b.dataset.nh; aNomina(); });
   $('#nfd').onchange = () => { nomFecha = $('#nfd').value; aNomina(); };
-  const guarda = async pagar => { try { const r = await call('admin_nomina_guardar', {p_fecha: nomFecha, p_lineas: lineas, p_pagar: pagar}); toast(pagar ? `Nómina pagada: ${money(r.total)}` : 'Borrador guardado'); aNomina(); } catch(e){ toast(e.message, true); } };
+  const guarda = async (pagar, forzar) => { try { const r = await call('admin_nomina_guardar', {p_fecha: nomFecha, p_lineas: lineas, p_pagar: pagar, p_forzar: !!forzar});
+      if (r.ok === false) return toast(r.error, true);
+      toast(pagar ? `Nómina pagada: ${money(r.total)}` : 'Borrador guardado'); aNomina(); } catch(e){ toast(e.message, true); } };
   const ns = $('#nsv'); if (ns) ns.onclick = () => guarda(false);
-  const np = $('#npg'); if (np) np.onclick = () => { if (!np.dataset.sure){ np.dataset.sure = 1; np.textContent = '¿Confirmas el pago? Toca otra vez'; return; } guarda(true); };
+  const conPend = lineas.filter(l => l.asistencia?.pendientes > 0);
+  const np = $('#npg'); if (np) np.onclick = () => { if (!np.dataset.sure){ np.dataset.sure = 1;
+      np.textContent = conPend.length ? `Hay salidas pendientes (${conPend.map(l => l.nombre).join(', ')}). ¿Pagar de todos modos? Toca otra vez` : '¿Confirmas el pago? Toca otra vez'; return; }
+    guarda(true, conPend.length > 0); };
   $('#enew').onclick = () => formEmpleado(null);
   app().querySelectorAll('[data-ee]').forEach(b => b.onclick = () => formEmpleado(emp.find(e => e.id === b.dataset.ee)));
+}
+function asisNomina(l){
+  const a = l.asistencia || {};
+  if (a.sin_pin) return '<span class="tag pend">sin PIN de asistencia</span><br><span class="muted small">se cuenta la semana completa</span>';
+  const p = [`<b>${a.registrados ?? a.trabajados} de ${a.programados}</b> días registrados`];
+  if (a.retardos) p.push(`<span class="neg">${a.retardos} retardo${a.retardos > 1 ? 's' : ''}</span>`);
+  if (a.faltas) p.push(`<span class="neg">${a.faltas} falta${a.faltas > 1 ? 's' : ''}</span>`);
+  if (a.pendientes) p.push(`<span class="tag est-cancelada">${a.pendientes} salida${a.pendientes > 1 ? 's' : ''} pendiente${a.pendientes > 1 ? 's' : ''}</span>`);
+  return `<span class="small">${p.join(' · ')}</span>${a.supuestos ? `<br><span class="muted small">+${a.supuestos} día(s) que le tocan y no se pueden medir (antes de la asistencia o todavía no pasan)</span>` : ''}`;
 }
 function formEmpleado(e){
   abreModal(`<div class="sheet"><h2>${e ? 'Editar' : 'Nueva'} persona</h2>
@@ -1417,12 +1863,18 @@ function formEmpleado(e){
       <label class="field">Día de pago<select id="em_d">${['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'].map(d => `<option ${(e?.dia_pago || 'Dom') === d ? 'selected' : ''}>${d}</option>`).join('')}</select></label>
       <label class="field">Fecha de ingreso<input type="date" id="em_i" value="${esc(e?.ingreso || '')}"></label><label class="field">Teléfono<input id="em_t" value="${esc(e?.telefono || '')}"></label></div>
     <label class="field">Notas<input id="em_x" value="${esc(e?.notas || '')}"></label>
+    <div class="grp"><div class="gt">Días que trabaja <span class="muted small">para asistencia, faltas y nómina</span></div><div class="chips" id="em_dias">${[1,2,3,4,5,6,0].map(d => `<button class="chip" data-dw="${d}" aria-pressed="${(e?.dias_trabajo || [0,1,2,3,4,5,6]).includes(d)}">${DSEM[d]}</button>`).join('')}</div>
+      <label class="field" style="margin-top:8px">Hora de entrada esperada<input type="time" id="em_h" class="cell w" value="${esc(e?.hora_entrada || '09:30')}"></label></div>
     ${e ? `<label class="row"><input type="checkbox" id="em_a" ${e.activo ? 'checked' : ''} style="width:22px;height:22px"> Activo</label>` : ''}
-    <p class="note" style="margin:0">Esto es solo para la nómina. Para que alguien use la tablet, dalo de alta con PIN en la pestaña Personal.</p>
+    <p class="note" style="margin:0">Para que checue su entrada y salida, dalo de alta con PIN en la pestaña Personal y enlázalo con esta ficha (a la cocina dale el rol “solo asistencia”).</p>
     <div class="foot"><button class="btn big" data-x="no">Cancelar</button><button class="btn pri big" data-x="si">Guardar</button></div></div>`);
   dlg().querySelector('[data-x="no"]').onclick = cierraModal;
+  dlg().querySelectorAll('[data-dw]').forEach(b => b.onclick = () => b.setAttribute('aria-pressed', b.getAttribute('aria-pressed') !== 'true'));
   dlg().querySelector('[data-x="si"]').onclick = async () => {
-    try { await call('admin_empleado_guardar', {p: {id: e?.id || null, nombre: $('#em_n').value, puesto: $('#em_p').value, pago_semanal: $('#em_s').value, dia_pago: $('#em_d').value, ingreso: $('#em_i').value, telefono: $('#em_t').value, notas: $('#em_x').value, activo: $('#em_a') ? $('#em_a').checked : true}});
+    const dias = [...dlg().querySelectorAll('[data-dw][aria-pressed="true"]')].map(b => Number(b.dataset.dw));
+    if (!dias.length) return toast('Elige al menos un día de trabajo.', true);
+    try { const r = await call('admin_empleado_guardar', {p: {id: e?.id || null, nombre: $('#em_n').value, puesto: $('#em_p').value, pago_semanal: $('#em_s').value, dia_pago: $('#em_d').value, ingreso: $('#em_i').value, telefono: $('#em_t').value, notas: $('#em_x').value, activo: $('#em_a') ? $('#em_a').checked : true}});
+      await call('admin_empleado_horario', {p_empleado: r.id, p_dias: dias, p_hora: $('#em_h').value || '09:30'});
       cierraModal(); toast('Guardado'); S.admin.emp = undefined; aNomina(); } catch(err){ toast(err.message, true); }
   };
 }
@@ -1465,7 +1917,9 @@ async function vRutina(){
     $('#rbody').innerHTML = `<p class="muted" style="margin-top:0">${fdate(d.fecha)}. Toca cada punto al terminarlo: queda registrado quién y a qué hora.</p><div class="two">
       ${['apertura','cierre'].map(t => { const items = d.items?.[t] || []; const hechos = items.filter((_, i) => d[t][i]?.hecho).length;
         return `<div class="card"><div class="row"><h2 style="margin:0">${t === 'apertura' ? 'Apertura' : 'Cierre'}</h2><span class="spacer"></span><span class="tag ${hechos === items.length ? 't-mesa' : 'pend'}">${hechos} de ${items.length}</span></div>
-        ${items.map((txt, i) => { const m = d[t][i]; return `<button class="chk ${m?.hecho ? 'on' : ''}" data-rt="${t}" data-ri="${i}"><span class="box">${m?.hecho ? '✓' : ''}</span><span><b>${esc(txt)}</b>${m?.hecho ? `<br><span class="muted small">${esc(m.quien)} · ${new Date(m.cuando).toLocaleTimeString('es-MX', {hour: '2-digit', minute: '2-digit'})}</span>` : ''}</span></button>`; }).join('')}</div>`; }).join('')}</div>`;
+        ${items.map((txt, i) => { const m = d[t][i]; const sal = t === 'cierre' && /salidas registradas/i.test(txt);
+          return `<button class="chk ${m?.hecho ? 'on' : ''}" data-rt="${t}" data-ri="${i}"><span class="box">${m?.hecho ? '✓' : ''}</span><span><b>${esc(txt)}</b>${m?.hecho ? `<br><span class="muted small">${esc(m.quien)} · ${new Date(m.cuando).toLocaleTimeString('es-MX', {hour: '2-digit', minute: '2-digit'})}</span>` : ''}
+            ${sal ? `<br><span class="small salidas ${d.salidas_abiertas?.length ? 'neg' : ''}">${d.salidas_abiertas?.length ? 'Siguen sin registrar su salida: ' + d.salidas_abiertas.map(x => `${esc(x.nombre)} (entró ${horaAP(x.entrada)})`).join(', ') : 'Todos registraron su salida ✓'}</span>` : ''}</span></button>`; }).join('')}</div>`; }).join('')}</div>`;
     $('#rbody').querySelectorAll('[data-rt]').forEach(b => b.onclick = async () => { const t = b.dataset.rt, i = Number(b.dataset.ri);
       try { d = await call('pos_rutina_marcar', {p_tipo: t, p_idx: i, p_hecho: !d[t][i]?.hecho}); pinta(); } catch(e){ toast(e.message, true); } });
   };
@@ -1710,14 +2164,17 @@ document.addEventListener('click', async e => {
   if (a === 'desc') return descuento();
   if (a === 'cancelOrden') return cancelarOrden();
   if (a === 'anular') return anularVenta(hoyISO());
-  if (a === 'cuenta') return preCuenta();
+  if (a === 'cuenta') return pedirCuenta(false);
+  if (a === 'recuenta') return pedirCuenta(true);
   if (a === 'mover') return moverMesa();
   if (a === 'corte'){ S.vista = 'corte'; return render(); }
   if (a === 'admin'){ S.vista = 'admin'; return render(); }
   if (a === 'rutina'){ S.vista = 'rutina'; return render(); }
+  if (a === 'asistencia'){ S.vista = 'asistencia'; return render(); }
+  if (a === 'checar'){ S.chk = {paso: 'nombre'}; return render(); }
   if (a === 'verErrores'){
     abreModal(`<div class="sheet"><h2>Operaciones no registradas</h2><p class="muted">Se hicieron sin internet y el servidor las rechazó. Captúralas de nuevo si hace falta.</p>
-      ${S.errores.map(x => `<div class="payrow"><span>${ftime(x.ts)} · ${esc(x.fn === 'pos_cobrar' ? 'Cobro' : 'Orden')}</span><span>${esc(x.msg)}</span></div>`).join('')}
+      ${S.errores.map(x => `<div class="payrow"><span>${ftime(x.ts)} · ${esc(x.fn === 'pos_cobrar' ? 'Cobro' : x.fn === 'asistencia' ? 'Asistencia' : 'Orden')}</span><span>${esc(x.msg)}</span></div>`).join('')}
       <div class="foot"><button class="btn big" data-x="no">Cerrar</button><button class="btn pri big" data-x="clr">Ya lo revisé</button></div></div>`);
     dlg().querySelector('[data-x="no"]').onclick = cierraModal;
     dlg().querySelector('[data-x="clr"]').onclick = () => { S.errores = []; guardaCola(); cierraModal(); render(); };
