@@ -7,7 +7,7 @@
 (() => {
 'use strict';
 const CFG = window.POS_CONFIG || {};
-const VERSION = '1.6.1';
+const VERSION = '1.6.2';
 
 /* ================= utilidades ================= */
 const $ = s => document.querySelector(s);
@@ -28,7 +28,7 @@ const CATS = ['Paquetes','Especialidades','Tacos','Bebidas','Postres','Extras'];
 const ACCION = {cancelar_producto:'Canceló producto', cancelar_orden:'Canceló orden', descuento:'Descuento', corte_caja:'Corte de caja',
   bloqueo_pin:'Bloqueo por PIN', cambio_precio:'Cambio de precio', cambio_producto:'Cambio de producto', alta_producto:'Alta de producto',
   alta_personal:'Alta de personal', cambio_personal:'Cambio de personal', desbloquear:'Desbloqueo', cambio_ajuste:'Cambio de ajuste',
-  anular_venta_cobrada:'Anuló venta cobrada', borrar_demo:'Borró datos demo',
+  anular_venta_cobrada:'Anuló venta cobrada', borrar_demo:'Borró datos demo', crear_demo:'Creó personal demo',
   descartar_pendiente:'Descartó orden no enviada', autorizo_sin_codigo:'Autorizó sin código (ajuste encendido)',
   asistencia_entrada:'Registró entrada', asistencia_salida:'Registró salida', asistencia_correccion:'Corrigió asistencia', reasignar_ordenes:'Reasignó órdenes',
   enlazar_empleado:'Enlazó con Nómina', horario_empleado:'Cambió horario',
@@ -207,7 +207,7 @@ function bloquear(){
     <button class="btn ghost block" id="lswitch" style="margin-top:12px">Cambiar de usuario</button></div>`;
   document.body.appendChild(el);
   // Datos de administración fuera de la memoria mientras está bloqueado
-  S.admin.rep = S.admin.bit = S.admin.per = S.admin.prods = S.admin.cfg = S.admin.inv = S.admin.od = null;
+  limpiaAdmin(S.admin); S.admin.atoHTML = null;
   if (S.vista === 'admin' || S.vista === 'corte' || S.vista === 'mapa') S.vista = 'inicio';
   padPin($('#lpad'), $('#ldots'), async pin => {
     if (S.online){
@@ -1134,11 +1134,11 @@ const ESTADO = {abierta: 'Abierta', cobrada: 'Cobrada', cancelada: 'Cancelada', 
 const lugarOrden = x => x.tipo === 'mesa' ? `Mesa ${x.mesa}` : (CANAL[x.tipo] || x.tipo) + (x.cliente ? ' · ' + x.cliente : '');
 async function ordenesDia(){
   const A = S.admin; const box = $('#odbox'); if (!box) return;
-  if (!A.odFecha) A.odFecha = hoyISO();
+  if (!A.odFecha){ A.odFecha = hoyISO(); A.odHoy = true; }
   box.innerHTML = `<div class="card row" style="margin-bottom:10px"><label class="row small" style="gap:6px">Fecha <input type="date" id="odf" class="cell w" value="${esc(A.odFecha)}"></label>
       <input id="odq" class="cell" style="width:150px;text-align:left" inputmode="numeric" placeholder="Buscar folio #" value="${esc(A.odQ || '')}" aria-label="Buscar por folio">
       <span class="muted small" id="odn"></span></div><div id="odlist"><p class="muted">Cargando…</p></div>`;
-  $('#odf').onchange = () => { A.odFecha = $('#odf').value || hoyISO(); A.od = null; ordenesDia(); };
+  $('#odf').onchange = () => { A.odFecha = $('#odf').value || hoyISO(); A.odHoy = A.odFecha === hoyISO(); A.od = null; ordenesDia(); };
   $('#odq').oninput = () => { A.odQ = $('#odq').value.replace(/\D/g, ''); pintaOrdenesDia(); };
   if (!A.od || A.odKey !== A.odFecha + A.demo){
     try { A.od = await call('admin_ordenes_dia', {p_fecha: A.odFecha, p_demo: A.demo}); A.odKey = A.odFecha + A.demo; }
@@ -1477,11 +1477,55 @@ function rango(k){
   if (k === 'mes') return [h.slice(0, 8) + '01', h];
   return [h, h];
 }
+/* ---------- Panel siempre al día ----------
+ * Cada vez que se entra al Panel, se cambia de pestaña o se toca "Actualizar" se vuelven a
+ * pedir los datos al servidor (no se reusa lo de antes). Los rangos "Hoy", "Esta semana"…
+ * se recorren solos cuando cambia el día (America/Monterrey). */
+const PANEL_AUTO = ['resumen', 'productos'];          // pestañas que se recargan solas cada 60 s
+function limpiaAdmin(A){ A.rep = A.bit = A.per = A.prods = A.cfg = A.inv = A.od = A.av = null; }
+function diaCambio(A){
+  if (A.rango){ const [d, h] = rango(A.rango); if (d !== A.desde || h !== A.hasta) return true; }
+  return !!(A.odHoy && A.odFecha && A.odFecha !== hoyISO());
+}
+function ajustaDia(A){
+  if (!diaCambio(A)) return false;
+  if (A.rango) [A.desde, A.hasta] = rango(A.rango);
+  if (A.odHoy) A.odFecha = hoyISO();
+  return true;
+}
+function marcaHora(){ S.admin.ultAct = Date.now(); const el = $('#ahora'); if (el) el.textContent = 'Actualizado ' + horaAP(new Date()); }
+// No recargar solo mientras alguien escribe, hay una ventana abierta o la pantalla está bloqueada
+function panelOcupado(){
+  const a = document.activeElement;
+  return !!(dlg()?.open || locked || document.visibilityState !== 'visible' || (a && ['INPUT', 'TEXTAREA', 'SELECT'].includes(a.tagName) && !['checkbox', 'radio', 'button'].includes(a.type)) || $('#anfo')?.value);
+}
+let refrescando = false;
+async function refrescaPanel(manual){
+  const A = S.admin; if (refrescando || S.vista !== 'admin') return;
+  if (ajustaDia(A) || !PANEL_AUTO.includes(A.tab)) return vAdmin();
+  refrescando = true; const tab = A.tab, clave = A.desde + A.hasta + A.demo;
+  try {
+    A.odFecha = A.odFecha || hoyISO();
+    // primero se piden los datos nuevos y luego se cambia la pantalla de un jalón (sin parpadeo)
+    const [rep, av, od] = await Promise.all([call('admin_reporte', {p_desde: A.desde, p_hasta: A.hasta, p_demo: A.demo}),
+      call('admin_panel_avisos', {p_demo: A.demo}).catch(() => null), tab === 'resumen' ? call('admin_ordenes_dia', {p_fecha: A.odFecha, p_demo: A.demo}) : null]);
+    if (S.vista !== 'admin' || A.tab !== tab || clave !== A.desde + A.hasta + A.demo || (!manual && panelOcupado())) return;
+    A.rep = rep; A.av = av; if (od){ A.od = od; A.odKey = A.odFecha + A.demo; }
+    const y = scrollY; await ({resumen: aResumen, productos: aProductos}[tab])(); scrollTo(0, y); marcaHora();
+  } catch(e){ if (manual) toast(e.code === 'RED' ? 'Sin internet: no se pudo actualizar.' : e.message, true); }
+  finally { refrescando = false; }
+}
+setInterval(() => {
+  const A = S.admin; if (!S.ses || S.vista !== 'admin' || !S.online || panelOcupado()) return;
+  if (PANEL_AUTO.includes(A.tab) ? Date.now() - (A.ultAct || 0) >= 60000 : diaCambio(A)) refrescaPanel(false);
+}, 5000);
 async function vAdmin(){
-  const A = S.admin; if (!A.desde) [A.desde, A.hasta] = rango('semana');
+  const A = S.admin; if (!A.desde){ A.rango = 'semana'; [A.desde, A.hasta] = rango('semana'); }
   if (rol() !== 'admin'){ S.vista = 'inicio'; return render(); }
+  ajustaDia(A); limpiaAdmin(A); A.ultAct = Date.now();
   const tabs = [['resumen','Ventas'],['resultado','Resultado'],['productos','Por producto'],['costos','Costos y ganancia'],['gastos','Gastos'],['nomina','Nómina'],['asistencia','Asistencia'],['marketing','Marketing'],['inventario','Inventario'],['recetas','Recetas'],['cortes','Cortes'],['bitacora','Bitácora'],['personal','Personal'],['menu','Menú y precios'],['ajustes','Ajustes']];
-  app().innerHTML = barra() + `<main><div class="row" style="margin-bottom:6px"><button class="btn" data-act="inicio">← POS</button><h1 style="margin:0">Panel de ventas</h1></div>
+  app().innerHTML = barra() + `<main><div class="row" style="margin-bottom:6px"><button class="btn" data-act="inicio">← POS</button><h1 style="margin:0">Panel de ventas</h1>
+      <span class="spacer"></span><span class="muted small" id="ahora">Cargando…</span><button class="btn" id="arefresh">Actualizar</button></div>
     <nav class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" aria-current="${A.tab === k}">${l}</button>`).join('')}</nav>
     ${['resumen','productos','cortes','bitacora','costos','resultado','gastos'].includes(A.tab) ? `<div class="row" style="margin-bottom:12px">
       ${[['hoy','Hoy'],['ayer','Ayer'],['semana','Esta semana'],['semana_ant','Semana pasada'],['mes','Este mes']].map(([k, l]) => `<button class="chip" data-rg="${k}" aria-pressed="${rango(k)[0] === A.desde && rango(k)[1] === A.hasta}">${l}</button>`).join('')}
@@ -1489,14 +1533,16 @@ async function vAdmin(){
       <label class="row small" style="gap:6px"><input type="checkbox" id="vdemo" ${A.demo ? 'checked' : ''} style="width:22px;height:22px"> Ver datos <span class="demo">DEMO</span></label></div>` : ''}
     <div id="abody"><p class="muted">Cargando…</p></div></main>`;
   app().querySelectorAll('[data-tab]').forEach(b => b.onclick = () => { A.tab = b.dataset.tab; vAdmin(); pintaSync(); });
-  app().querySelectorAll('[data-rg]').forEach(b => b.onclick = () => { [A.desde, A.hasta] = rango(b.dataset.rg); A.rep = A.bit = null; vAdmin(); pintaSync(); });
+  app().querySelectorAll('[data-rg]').forEach(b => b.onclick = () => { A.rango = b.dataset.rg; [A.desde, A.hasta] = rango(A.rango); vAdmin(); pintaSync(); });
+  $('#arefresh').onclick = () => refrescaPanel(true);
   const dd = $('#dd'), dh = $('#dh'), vd = $('#vdemo');
-  if (dd) dd.onchange = () => { A.desde = dd.value; if (A.hasta < A.desde) A.hasta = A.desde; A.rep = A.bit = null; vAdmin(); };
-  if (dh) dh.onchange = () => { A.hasta = dh.value; if (A.hasta < A.desde) A.desde = A.hasta; A.rep = A.bit = null; vAdmin(); };
-  if (vd) vd.onchange = () => { A.demo = vd.checked; A.rep = A.bit = null; vAdmin(); };
+  if (dd) dd.onchange = () => { A.desde = dd.value; if (A.hasta < A.desde) A.hasta = A.desde; A.rango = null; vAdmin(); };
+  if (dh) dh.onchange = () => { A.hasta = dh.value; if (A.hasta < A.desde) A.desde = A.hasta; A.rango = null; vAdmin(); };
+  if (vd) vd.onchange = () => { A.demo = vd.checked; vAdmin(); };
   if (!A.respChk){ A.respChk = true; call('admin_config').then(c => { A.ultResp = c.ultimo_respaldo || null; if (S.vista === 'admin') pintaRecordatorio(); }).catch(() => {}); } else pintaRecordatorio();
-  try { await ({resumen: aResumen, resultado: aResultado, gastos: aGastos, nomina: aNomina, asistencia: aAsistencia, marketing: aMarketing, productos: aProductos, inventario: aInventario, recetas: aRecetas, costos: aCostos, cortes: aCortes, bitacora: aBitacora, personal: aPersonal, menu: aMenu, ajustes: aAjustes}[A.tab])(); }
-  catch(e){ $('#abody').innerHTML = `<div class="banner crit">${esc(e.message)}</div>`; }
+  const tab = A.tab;
+  try { await ({resumen: aResumen, resultado: aResultado, gastos: aGastos, nomina: aNomina, asistencia: aAsistencia, marketing: aMarketing, productos: aProductos, inventario: aInventario, recetas: aRecetas, costos: aCostos, cortes: aCortes, bitacora: aBitacora, personal: aPersonal, menu: aMenu, ajustes: aAjustes}[A.tab])(); if (A.tab === tab) marcaHora(); }
+  catch(e){ if ($('#abody')) $('#abody').innerHTML = `<div class="banner crit">${esc(e.message)}</div>`; }
 }
 function pintaRecordatorio(){
   const A = S.admin;
@@ -1534,16 +1580,21 @@ async function pintaAtoradas(){
   let d; try { d = await call('admin_pendientes_tablets'); } catch(e){ return; }
   if (!$('#atoradas')) return;
   const QUE = {pos_guardar_orden: 'Orden', pos_cobrar: 'Cobro', pos_imprimir: 'Impresión'};
-  box.innerHTML = `<div class="card" id="atocard" style="margin-bottom:14px"><h2 style="margin:0 0 6px">Órdenes atoradas en tablets</h2>
+  $('#atoradas').innerHTML = S.admin.atoHTML = `<div class="card" id="atocard" style="margin-bottom:14px"><h2 style="margin:0 0 6px">Órdenes atoradas en tablets</h2>
     ${!d.length ? '<p class="muted" style="margin:0">Ninguna tablet tiene órdenes sin enviar. ✔</p>' : d.map(t => `<h3 style="margin:10px 0 4px">${esc(t.nombre || 'Tablet')} <span class="muted small">· último aviso ${ftime(t.ultimo_reporte)}${t.version ? ' · v' + esc(t.version) : ''}</span></h3>
       ${tabla([['Qué', x => esc(QUE[x.fn] || x.fn) + (x.es_demo ? ' <span class="tag tdemo">DEMO</span>' : '')], ['Orden', x => esc(x.etiqueta || '—') + (x.en_base ? ' <span class="muted small">(sí está en la caja)</span>' : '')],
         ['De', x => esc(x.de)], ['Guardada', x => ftime(x.guardada_en)], ['Importe', x => x.fn === 'pos_guardar_orden' ? money(x.total) : '—', 'n'], ['Problema', x => x.error ? `<span class="neg">${esc(x.error)}</span>` : '<span class="muted">Esperando internet o a que entre esa persona</span>', 'w']], t.items || [])}`).join('')}
     ${d.length ? '<p class="note" style="margin:6px 0 0">Para quitarlas: en esa tablet entra con el usuario que la hizo. Si tiene más de 30 minutos aparece el botón <b>Descartar</b>; se autoriza con tu PIN (o por teléfono) y queda en la bitácora.</p>' : ''}</div>`;
 }
 async function aResumen(){
-  const r = await reporte(); const h = hoyISO();
-  const hoy = r.por_dia.find(d => d.fecha === h);
-  $('#abody').innerHTML = `<div id="atoradas"></div>${S.admin.demo ? '<div class="banner">Estás viendo datos DEMO.</div>' : ''}
+  const A = S.admin;
+  const [r] = await Promise.all([reporte(), A.av ? null : call('admin_panel_avisos', {p_demo: A.demo}).then(v => { A.av = v; }).catch(() => {})]);
+  if (!$('#abody') || A.tab !== 'resumen') return;
+  const h = hoyISO(); const hoy = r.por_dia.find(d => d.fecha === h); const av = A.av;
+  const nOrd = n => n === 1 ? '1 orden abierta' : `${n} órdenes abiertas`;
+  $('#abody').innerHTML = `<div id="atoradas">${A.atoHTML || ''}</div>${S.admin.demo ? '<div class="banner">Estás viendo datos DEMO.</div>' : ''}
+    ${av && !A.demo && av.demo_hoy ? `<div class="banner" id="avdemo">Hoy hay ${av.demo_hoy} ${av.demo_hoy === 1 ? 'orden hecha' : 'órdenes hechas'} con usuarios DEMO; no cuentan en estos números.</div>` : ''}
+    ${av && av.abiertas ? `<p class="note" id="avabiertas" style="margin:0 0 10px">Solo cuenta órdenes cobradas. Hay ${nOrd(av.abiertas)} ahora.</p>` : ''}
     <div class="grid kpis">
       <div class="kpi"><div class="l">Ventas del periodo</div><div class="v num">${money(r.ventas)}</div></div>
       <div class="kpi"><div class="l">Ventas de hoy</div><div class="v num">${money(hoy?.ventas || 0)}</div></div>
@@ -1610,12 +1661,15 @@ async function aPersonal(){
   $('#abody').innerHTML = `<div class="row" style="margin-bottom:12px"><button class="btn pri" id="pnew">+ Agregar persona</button></div>
     ${tabla([['Nombre', x => esc(x.nombre) + (x.es_demo ? ' <span class="demo">DEMO</span>' : '')], ['Rol', x => ROL_TXT[x.rol] || x.rol], ['Nómina', x => x.empleado ? esc(x.empleado) : (x.rol === 'admin' ? '—' : '<span class="muted small">sin enlazar</span>')], ['Estado', x => x.activo ? 'Activo' : 'Baja'], ['Bloqueo', x => x.bloqueado ? `<b class="neg">Bloqueado</b> <button class="btn sm" data-unl="${esc(x.id)}">Desbloquear</button>` : (x.intentos ? x.intentos + ' intento(s) fallido(s)' : '—')], ['', x => `<button class="btn sm" data-ped="${esc(x.id)}">Editar</button>`]], A.per)}
     <p class="note">Mesero y solo asistencia: PIN de 4 a 6 dígitos. Encargada y administrador: 6 dígitos. “Solo asistencia” (cocina) solo puede registrar entrada y salida: no entra al POS ni ve órdenes, precios ni ventas. Enlaza a cada persona con su ficha de Nómina para que su asistencia cuente en la nómina. Nadie puede ver un PIN: solo se cambia. Dar de baja o cambiar el PIN cierra la sesión de esa persona.</p>
-    ${A.per.some(p => p.es_demo) && !esDemo() ? `<div class="card" style="margin-top:16px"><h2>Datos de prueba</h2><p class="muted">Borra el personal DEMO con todas sus órdenes, cobros, cortes y bitácora. Los datos reales no se tocan.</p><button class="btn" id="bdemo" style="border-color:var(--crit);color:var(--crit)">Borrar datos demo</button></div>` : ''}`;
+    ${esDemo() ? '' : A.per.some(p => p.es_demo) ? `<div class="card" id="cdemo" style="margin-top:16px"><h2>Datos de prueba</h2><p class="muted">Borra el personal DEMO con todas sus órdenes, cobros, cortes y bitácora. Los datos reales no se tocan.</p><button class="btn" id="bdemo" style="border-color:var(--crit);color:var(--crit)">Borrar datos demo</button></div>`
+      : `<div class="card" id="cdemo" style="margin-top:16px"><h2>Datos de prueba</h2><p class="muted">No hay personal DEMO. Si lo necesitan para practicar, se puede volver a crear (Mesero A, Mesero B, Encargada y Admin de prueba). Sus ventas nunca se mezclan con las reales.</p><button class="btn" id="crdemo">Volver a crear usuarios DEMO para capacitación</button></div>`}`;
   app().querySelectorAll('[data-unl]').forEach(b => b.onclick = async () => { await call('admin_desbloquear', {p_staff: b.dataset.unl}); toast('Desbloqueado'); aPersonal(); });
   app().querySelectorAll('[data-ped]').forEach(b => b.onclick = () => formPersona(A.per.find(p => p.id === b.dataset.ped)));
   $('#pnew').onclick = () => formPersona(null);
   const bd = $('#bdemo'); if (bd) bd.onclick = async () => { if (!bd.dataset.sure){ bd.dataset.sure = 1; bd.textContent = '¿Seguro? Toca otra vez'; return; }
     try { const r = await call('admin_borrar_demo'); toast(`Datos demo borrados (${r.ordenes_borradas} órdenes)`); S.admin.rep = S.admin.bit = null; aPersonal(); } catch(e){ toast(e.message, true); } };
+  const cd = $('#crdemo'); if (cd) cd.onclick = async () => {
+    try { const r = await call('admin_crear_demo'); if (!r.ok) return toast(r.error, true); toast(r.mensaje || 'Personal DEMO creado'); aPersonal(); } catch(e){ toast(e.message, true); } };
 }
 const ROL_TXT = {mesero: 'mesero', encargada: 'encargada', admin: 'administrador', asistencia: 'solo asistencia'};
 async function formPersona(p){
