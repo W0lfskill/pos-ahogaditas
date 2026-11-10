@@ -7,7 +7,7 @@
 (() => {
 'use strict';
 const CFG = window.POS_CONFIG || {};
-const VERSION = '1.6.0';
+const VERSION = '1.6.1';
 
 /* ================= utilidades ================= */
 const $ = s => document.querySelector(s);
@@ -29,6 +29,7 @@ const ACCION = {cancelar_producto:'Canceló producto', cancelar_orden:'Canceló 
   bloqueo_pin:'Bloqueo por PIN', cambio_precio:'Cambio de precio', cambio_producto:'Cambio de producto', alta_producto:'Alta de producto',
   alta_personal:'Alta de personal', cambio_personal:'Cambio de personal', desbloquear:'Desbloqueo', cambio_ajuste:'Cambio de ajuste',
   anular_venta_cobrada:'Anuló venta cobrada', borrar_demo:'Borró datos demo',
+  descartar_pendiente:'Descartó orden no enviada', autorizo_sin_codigo:'Autorizó sin código (ajuste encendido)',
   asistencia_entrada:'Registró entrada', asistencia_salida:'Registró salida', asistencia_correccion:'Corrigió asistencia', reasignar_ordenes:'Reasignó órdenes',
   enlazar_empleado:'Enlazó con Nómina', horario_empleado:'Cambió horario',
   uso_2fa:'Usó código de verificación', codigo_2fa_fallido:'Código de verificación incorrecto', activar_2fa:'Activó verificación en dos pasos', quitar_2fa:'Quitó verificación en dos pasos'};
@@ -58,6 +59,7 @@ const S = {
   o: null,              // orden en edición {id, tipo, mesa, cliente, items(server), nuevos[]}
   cat: 'Paquetes',
   cola: store.get('cola', []),
+  colaAviso: null,      // {code, msg}: por qué no se ha podido enviar la cola (SIN_ENTRADA / SESION)
   colaAsis: store.get('cola_asis', []),   // marcas de asistencia hechas sin internet (se borran al enviarse)
   chk: null,            // pantalla de checar entrada / salida (sin sesión)
   errores: store.get('errores', []),
@@ -96,19 +98,29 @@ const call = (fn, p) => rpc(fn, {p_token: S.ses?.token, ...p});
 
 /* ---------- cola sin internet: solo guardar orden y cobrar ---------- */
 function setOnline(v){ if (S.online !== v){ S.online = v; pintaSync(); } }
-function guardaCola(){ store.set('cola', S.cola); store.set('errores', S.errores); pintaSync(); }
-function encola(fn, params){ S.cola.push({id: uuid(), staff: S.ses.staff.id, fn, params, ts: Date.now()}); guardaCola(); }
+function guardaCola(){ store.set('cola', S.cola); store.set('errores', S.errores); pintaSync(); reportaLuego(); }
+function encola(fn, params){ S.cola.push({id: uuid(), staff: S.ses.staff.id, nombre: S.ses.staff.nombre, es_demo: esDemo(), fn, params, ts: Date.now()}); guardaCola(); }
+// Por qué no se ha podido enviar lo guardado sin internet (SIN_ENTRADA / SESION). No se borra nada: se reintenta solo.
+const AVISO_COLA = {
+  SIN_ENTRADA: 'No se han podido enviar porque falta registrar tu entrada de hoy. Registra tu entrada y se envían solas.',
+  SESION: 'No se han podido enviar porque tu sesión terminó. Vuelve a entrar con tu PIN y se envían solas.'};
 let flushing = false;
 async function sincroniza(){
   if (flushing || !S.ses) return; flushing = true;
   try {
     for (const it of [...S.cola]){
       if (it.staff !== S.ses.staff.id) continue;
-      try { const r = await rpc(it.fn, {p_token: S.ses.token, ...it.params}); S.cola = S.cola.filter(x => x.id !== it.id); guardaCola();
+      try { const r = await rpc(it.fn, {p_token: S.ses.token, ...it.params}); S.cola = S.cola.filter(x => x.id !== it.id); S.colaAviso = null; guardaCola();
         if (it.fn === 'pos_guardar_orden' && r?.orden?.folio && !S.ordenes[r.orden.id]?.folio){ S.ordenes[r.orden.id] = {...r.orden}; toast(`Ya hay internet: ${etiquetaOrden(r.orden)} es la orden #${r.orden.folio}. Anótalo en la comanda.`); } }
       catch(e){
         if (e.code === 'RED') break;
-        if (e.code === 'SESION' || e.code === 'SIN_ENTRADA') break;
+        if (e.code === 'SESION' || e.code === 'SIN_ENTRADA'){
+          // no se pierde: se queda en la tablet con el motivo, y se reintenta al registrar la entrada / volver a entrar
+          S.colaAviso = {code: e.code, msg: AVISO_COLA[e.code]};
+          S.cola.forEach(x => { if (x.staff === it.staff){ x.err = AVISO_COLA[e.code]; x.intentos = (x.intentos || 0) + 1; } }); guardaCola();
+          if (S.vista === 'inicio') render();
+          break;
+        }
         S.cola = S.cola.filter(x => x.id !== it.id);
         S.errores.push({ts: Date.now(), msg: e.message, fn: it.fn, staff: it.staff}); guardaCola();
         toast('Una operación guardada sin internet no se pudo registrar: ' + e.message, true);
@@ -118,9 +130,35 @@ async function sincroniza(){
   if (!S.cola.some(x => x.staff === S.ses?.staff?.id)) await cargaOrdenes(true);
 }
 setInterval(() => { if (S.ses && S.cola.length) sincroniza(); }, 8000);
-addEventListener('online', () => { S.online = true; sincroniza(); pintaSync(); });
+addEventListener('online', () => { S.online = true; sincroniza(); pintaSync(); reportaLuego(); });
 addEventListener('offline', () => { S.online = false; pintaSync(); });
 function pendientes(){ return S.cola.filter(x => x.staff === S.ses?.staff?.id).length; }
+// Operaciones de la cola que pertenecen a una orden (guardar, cobrar, imprimir)
+const ordenDe = it => it.params?.p_orden?.id || it.params?.p_orden;
+const colaDeOrden = id => S.cola.filter(x => x.staff === S.ses?.staff?.id && ordenDe(x) === id);
+/* ---------- la tablet le avisa al servidor qué tiene sin enviar (Panel › Ventas) ---------- */
+function tabletId(){ let t = store.get('tablet_id', null); if (!t){ t = uuid(); store.set('tablet_id', t); } return t; }
+function tabletNombre(){ const u = navigator.userAgent; const k = /iPad/.test(u) ? 'iPad' : /iPhone/.test(u) ? 'iPhone' : /Android/.test(u) ? (/Mobile/.test(u) ? 'Celular Android' : 'Tablet Android') : /Mac/.test(u) ? 'Mac' : /Windows/.test(u) ? 'PC' : 'Equipo';
+  return `${k} ${tabletId().slice(0, 4).toUpperCase()}`; }
+function resumenCola(it){
+  let etiqueta = '', total = 0, productos = 0;
+  if (it.fn === 'pos_guardar_orden'){
+    const p = it.params.p_orden; etiqueta = p.tipo === 'mesa' ? `Mesa ${p.mesa}` : p.tipo === 'llevar' ? `Llevar${p.cliente ? ' · ' + p.cliente : ''}` : (CANAL[p.tipo] || p.tipo);
+    for (const i of p.items || []){ const pr = prodById(i.producto_id); const c = pr ? calculaItem(pr, i.opciones, p.tipo) : {precio: 0}; productos += i.cantidad; total += (c.precio || 0) * i.cantidad; }
+  } else { const o = S.ordenes[ordenDe(it)]; etiqueta = (it.fn === 'pos_cobrar' ? 'Cobro · ' : it.fn === 'pos_imprimir' ? 'Impresión · ' : '') + (o ? etiquetaOrden(o) : ''); }
+  return {id: it.id, orden_id: ordenDe(it) || null, fn: it.fn, staff_id: it.staff, etiqueta, total: r2(total), productos, guardada_en: new Date(it.ts).toISOString(), error: it.err || null};
+}
+let repT = null, reportando = false;
+function reportaLuego(){ clearTimeout(repT); repT = setTimeout(reportaPendientes, 1500); }
+async function reportaPendientes(){
+  if (reportando || !S.clave || !S.online || !CFG.API_URL) return;
+  const items = S.cola.map(resumenCola); const firma = JSON.stringify(items);
+  if (firma === store.get('rep_firma', '[]')) return;
+  reportando = true;
+  try { await rpc('pos_reportar_pendientes', {p_clave: S.clave, p_tablet: tabletId(), p_nombre: tabletNombre(), p_version: VERSION, p_items: items}); store.set('rep_firma', firma); }
+  catch(e){} finally { reportando = false; }
+}
+setInterval(reportaPendientes, 60000);
 function syncInfo(){
   const p = pendientes(), otros = S.cola.length - p;
   if (S.errores.length && rol() && rol() !== 'mesero') return ['sync err', `${S.errores.length} con error`];
@@ -256,7 +294,7 @@ async function vLogin(sel){
       ${S.colaAsis.length ? `<p class="banner">${S.colaAsis.length} marca(s) de asistencia guardadas sin internet. Se envían solas al volver el internet.</p>` : ''}
       <h1>¿Quién eres?</h1><div class="grid people">${real.map(card).join('')}</div>
       ${demo.length ? `<h3>Personal de prueba <span class="demo">DEMO</span></h3><div class="grid people">${demo.map(card).join('')}</div>` : ''}
-      ${S.cola.length ? `<p class="banner" style="margin-top:16px">Hay ${S.cola.length} operación(es) guardadas sin internet. Se envían cuando entre la persona que las hizo.</p>` : ''}
+      ${S.cola.length ? `<p class="banner" style="margin-top:16px">Hay operaciones guardadas sin internet en esta tablet: ${Object.entries(S.cola.reduce((m, x) => { const n = S.personal.find(p => p.id === x.staff)?.nombre || x.nombre || '¿?'; m[n] = (m[n] || 0) + 1; return m; }, {})).map(([n, c]) => `<b>${esc(n)}</b> (${c})`).join(', ')}. Se envían solas cuando esa persona entre con su PIN.</p>` : ''}
       <p class="note">v${VERSION}</p>`;
     $('#lg').querySelectorAll('[data-pick]').forEach(b => b.onclick = () => vLogin(S.personal.find(p => p.id === b.dataset.pick)));
     return;
@@ -339,17 +377,25 @@ function aplicaLocal(it){
 }
 
 /* ---------- inicio ---------- */
+// Minutos desde la operación más vieja sin enviar de esa orden
+function pendMin(o){ const c = colaDeOrden(o.id); return c.length ? minsAgo(Math.min(...c.map(x => x.ts))) : 0; }
+function pendInfo(o){ const err = colaDeOrden(o.id).map(x => x.err).filter(Boolean).pop();
+  return err ? `<span class="small pendmsg">⚠ ${esc(err)}</span>` : `<span class="small muted">Se envía sola cuando haya internet.</span>`; }
 function vInicio(){
   const r = rol(); const lista = Object.values(S.ordenes).sort((a, b) => String(a.abierta_en).localeCompare(String(b.abierta_en)));
   const mias = lista.filter(o => r === 'mesero' || o.mesero_id === S.ses.staff.id || o.pendiente);
   const otras = r === 'mesero' ? [] : lista.filter(o => !mias.includes(o));
   const card = o => { const t = totales(o); return `<div class="ordwrap"><button class="card order" data-open="${esc(o.id)}">
-      <div class="row"><span class="tag ${o.tipo === 'mesa' ? 't-mesa' : o.tipo === 'llevar' ? 't-llevar' : 't-app'}">${esc(CANAL[o.tipo])}</span>${o.pendiente ? '<span class="tag pend">Por enviar</span>' : ''}<span class="spacer"></span>${folioHTML(o)}</div>
-      <b>${esc(etiquetaOrden(o))}</b><div class="row"><span class="t num">${money(t.total)}</span><span class="spacer"></span><span class="muted small">${minsAgo(o.abierta_en)} min${otras.length || r !== 'mesero' ? ' · ' + esc(o.mesero || '') : ''}</span></div></button>
-      ${o.pendiente ? '' : `<button class="btn cx" data-cxo="${esc(o.id)}">Cancelar orden</button>`}</div>`; };
+      <div class="row"><span class="tag ${o.tipo === 'mesa' ? 't-mesa' : o.tipo === 'llevar' ? 't-llevar' : 't-app'}">${esc(CANAL[o.tipo])}</span>${o.pendiente ? '<span class="tag pend">Por enviar</span>' : ''}${demo ? '<span class="tag tdemo">DEMO</span>' : ''}<span class="spacer"></span>${folioHTML(o)}</div>
+      <b>${esc(etiquetaOrden(o))}</b><div class="row"><span class="t num">${money(t.total)}</span><span class="spacer"></span><span class="muted small">${minsAgo(o.abierta_en)} min${otras.length || r !== 'mesero' ? ' · ' + esc(o.mesero || '') : ''}</span></div>
+      ${o.pendiente ? pendInfo(o) : ''}</button>
+      ${o.pendiente ? (pendMin(o) >= 30 ? `<button class="btn cx" data-desc="${esc(o.id)}">Descartar</button>` : '') : `<button class="btn cx" data-cxo="${esc(o.id)}">Cancelar orden</button>`}</div>`; };
+  const demo = esDemo();
   const foco = document.activeElement?.id === 'cerq' ? document.activeElement.selectionStart : null;
+  const aviso = S.colaAviso && pendientes() ? `<div class="banner crit" id="avisocola"><b>${pendientes()} operación(es) guardadas sin internet siguen en esta tablet.</b> ${esc(S.colaAviso.msg)}
+    ${S.colaAviso.code === 'SIN_ENTRADA' ? '<button class="btn sm" data-act="irEntrada">Registrar entrada</button>' : ''}</div>` : '';
   const errs = r !== 'mesero' && S.errores.length ? `<div class="banner crit">${S.errores.length} operación(es) hechas sin internet no se registraron. <button class="btn sm" data-act="verErrores">Ver</button></div>` : '';
-  app().innerHTML = barra() + `<main>${errs}
+  app().innerHTML = barra() + `<main>${aviso}${errs}
     <div class="row" style="margin-bottom:14px"><button class="btn pri big" data-act="nueva" style="flex:1;min-width:220px">+ Nueva orden</button>
       ${r !== 'mesero' ? '<button class="btn big" data-act="rutina">Apertura y cierre</button><button class="btn big" data-act="corte">Corte de caja</button><button class="btn big" data-act="asistencia">Quién está hoy</button>' : ''}${r === 'admin' ? '<button class="btn big" data-act="mapa">Mapa del restaurante</button><button class="btn big" data-act="anular">Anular venta cobrada</button><button class="btn big" data-act="admin">Panel</button>' : ''}</div>
     <h3>${r === 'mesero' ? 'Mis órdenes abiertas' : 'Mis órdenes'}</h3>
@@ -360,6 +406,7 @@ function vInicio(){
   </main>`;
   app().querySelectorAll('[data-open]').forEach(b => b.onclick = () => abreOrden(b.dataset.open));
   app().querySelectorAll('[data-cxo]').forEach(b => b.onclick = () => cancelarOrden(b.dataset.cxo));
+  app().querySelectorAll('[data-desc]').forEach(b => b.onclick = () => descartarPendiente(b.dataset.desc));
   montaCerradas();
   if (foco != null){ const q = $('#cerq'); if (q){ q.focus(); try { q.setSelectionRange(foco, foco); } catch(e){} } }
 }
@@ -857,20 +904,37 @@ function moverMesa(){
 //   en persona (PIN + código si tiene autenticador) o por teléfono (solo el código
 //   de su autenticador, que él dicta por llamada). El servidor lo vuelve a validar.
 // opts.anular: anular venta cobrada (solo desde la sesión del admin; sin teléfono).
-const SOLO_ADMIN = 'Solo el administrador puede cancelar. Llama a Guillermo.';
+// Ventana que explica por qué no se puede autorizar y qué hacer (no un aviso que se cierra solo).
+function ventanaExplica(titulo, parrafos){
+  abreModal(`<div class="sheet" id="vexp"><h2 style="margin:0">${esc(titulo)}</h2>${parrafos.map(p => `<p style="margin:0;font-size:18px;line-height:1.45">${p}</p>`).join('')}
+    <div class="foot"><button class="btn pri big" data-x="ok">Entendido</button></div></div>`);
+  dlg().querySelector('[data-x="ok"]').onclick = cierraModal;
+}
 async function hojaAutoriza(titulo, detalle, motivos, extraHTML, onOk, onDraw, opts = {}){
   if (!S.online){ toast(opts.cancela ? 'Para cancelar se necesita internet.' : 'Para autorizar se necesita internet.', true); return; }
   if (opts.cancela){ try { S.personal = await rpc('pos_personal', {p_clave: S.clave}); } catch(e){ if (e.code === 'RED') return toast('Para cancelar se necesita internet.', true); } }
-  const obliga = !!S.ses.config?.cancelar_requiere_2fa;
+  const obliga = S.ses.config?.cancelar_requiere_2fa === true;
   const mismo = p => p.es_demo === esDemo();
   // opciones: {k, id, nombre, tel, dos_pasos}
-  let aut;
+  let aut, ayuda = '';
   if (opts.cancela){
     const admins = S.personal.filter(p => p.rol === 'admin' && mismo(p));
-    aut = admins.filter(p => !obliga || p.dos_pasos).map(p => ({k: p.id, id: p.id, nombre: p.nombre, tel: false, dos_pasos: p.dos_pasos}));
-    if (!opts.anular) admins.filter(p => p.dos_pasos && p.id !== S.ses.staff.id)
+    const conCod = admins.filter(p => p.dos_pasos);
+    if (!admins.length) return ventanaExplica('No hay administrador registrado', ['Solo un administrador puede autorizar esto, y en esta tablet no aparece ninguno activo.',
+      'Guillermo debe revisar en <b>Panel › Personal</b> que su usuario esté activo.']);
+    // En persona: el admin SIEMPRE puede autorizar aquí con su PIN (+ código si lo tiene).
+    // Solo si el ajuste exige código y OTRO admin sí lo tiene, el que no lo tiene queda fuera (igual que el servidor).
+    aut = admins.filter(p => !obliga || p.dos_pasos || !conCod.length).map(p => ({k: p.id, id: p.id, nombre: p.nombre, tel: false, dos_pasos: p.dos_pasos}));
+    if (!opts.anular) conCod.filter(p => p.id !== S.ses.staff.id)
       .forEach(p => aut.push({k: 'tel:' + p.id, id: p.id, nombre: p.nombre, tel: true, dos_pasos: true}));
-    if (!aut.length) return toast(obliga ? 'El administrador no tiene la verificación en dos pasos activa: no se puede autorizar. ' + SOLO_ADMIN : SOLO_ADMIN, true);
+    const yoAdmin = rol() === 'admin';
+    if (!opts.anular && !yoAdmin && !conCod.length){
+      const n = esc(admins[0].nombre);
+      ayuda = `<div class="banner" id="ayuda2fa" style="margin:0;background:var(--info-bg);color:var(--info)"><b>¿Por qué no aparece “${n} (por teléfono)”?</b><br>
+        ${n} debe activar su Google Authenticator en <b>Panel › Ajustes</b> para poder autorizar por teléfono.
+        Mientras tanto, pídele que escriba su PIN aquí en esta tablet.</div>`;
+    }
+    if (obliga && !conCod.length) ayuda += `<p class="note" style="margin:0">El ajuste “Las cancelaciones requieren código” está encendido, pero ningún administrador tiene el autenticador activo: se autoriza con el PIN y queda anotado en la bitácora.</p>`;
   } else {
     aut = S.personal.filter(p => (p.rol === 'encargada' || p.rol === 'admin') && mismo(p)).map(p => ({k: p.id, id: p.id, nombre: p.nombre, tel: false, dos_pasos: p.dos_pasos}));
     if (!aut.length) return toast('No hay quién pueda autorizar.', true);
@@ -881,14 +945,14 @@ async function hojaAutoriza(titulo, detalle, motivos, extraHTML, onOk, onDraw, o
   const conCodigo = () => opts.cancela && (porTel() || pideCod || !!sel()?.dos_pasos);
   const draw = (msg) => {
     const t = sel();
-    abreModal(`<div class="sheet"><h2 style="margin:0">${esc(titulo)}</h2><p class="muted" style="margin:0">${esc(detalle)}</p>${(typeof extraHTML === 'function' ? extraHTML() : extraHTML) || ''}
+    abreModal(`<div class="sheet"><h2 style="margin:0">${esc(titulo)}</h2><p class="muted" style="margin:0">${esc(detalle)}</p>${ayuda}${(typeof extraHTML === 'function' ? extraHTML() : extraHTML) || ''}
       <div class="grp"><div class="gt">Motivo <span class="muted small">obligatorio</span></div><div class="chips">${motivos.map(m => `<button class="chip" data-mot="${esc(m)}" aria-pressed="${motivo === m}">${esc(m)}</button>`).join('')}</div>
         <input id="motl" style="margin-top:8px;font:17px var(--body);padding:10px;border-radius:10px;border:1.5px solid var(--line);background:var(--bg);color:var(--fg);width:100%" maxlength="100" placeholder="Otro motivo…" value="${esc(motivos.includes(motivo) ? '' : motivo)}"></div>
       <div class="grp"><div class="gt">Autoriza${opts.cancela ? ' <span class="muted small">solo el administrador</span>' : ''}</div><div class="opts">${aut.map(p => `<button class="opt" data-aut="${esc(p.k)}" aria-pressed="${quien === p.k}">${esc(p.nombre)}${p.tel ? '<small>por teléfono</small>' : ''}</button>`).join('')}</div>
         ${t?.tel ? `<p class="banner" style="margin:10px 0 0;background:var(--info-bg);color:var(--info)">Llama a ${esc(t.nombre)}. Te va a dictar el código de 6 dígitos de su Google Authenticator. Escríbelo aquí. Quedará registrado que tú lo capturaste.</p>`
           : `<label class="field" style="margin-top:10px">PIN de quien autoriza<input id="apin" type="password" inputmode="numeric" maxlength="6" autocomplete="off" value="${esc(pin)}"></label>`}
         ${conCodigo() ? `<label class="field" style="margin-top:10px">${t?.tel ? `Código que te dicta ${esc(t.nombre)}` : 'Código de 6 dígitos de su autenticador'}<input id="acod" class="big num" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000" value="${esc(cod)}"></label>` : ''}</div>
-      ${opts.cancela ? '<p class="note" style="margin:0">Se cancela y queda registrada en la bitácora: quién autorizó, quién capturó, cuándo, motivo e importe. Sale de las ventas y del corte.</p>' : ''}
+      ${opts.cancela ? `<p class="note" style="margin:0">${esc(opts.nota || 'Se cancela y queda registrada en la bitácora: quién autorizó, quién capturó, cuándo, motivo e importe. Sale de las ventas y del corte.')}</p>` : ''}
       <div class="msg">${esc(msg || '')}</div>
       <div class="foot"><button class="btn big" data-x="no">Volver</button><button class="btn pri big" data-x="si">Autorizar</button></div></div>`);
     const d = dlg();
@@ -945,6 +1009,28 @@ function cancelarOrden(id){
       if (S.o?.id === o.id){ S.o = null; S.vista = 'inicio'; } toast('Orden cancelada y registrada'); render(); }
     return r;
   }, null, {cancela: true});
+}
+// Descartar una orden "Por enviar" que se quedó atorada en esta tablet (más de 30 min).
+// Nunca llegó a la caja: se quita de la tablet con autorización del admin y queda en la bitácora.
+function descartarPendiente(id){
+  const o = S.ordenes[id]; const ops = colaDeOrden(id); if (!o || !ops.length) return;
+  const nuevos = o.items.filter(i => i.pendiente);
+  const total = r2(nuevos.reduce((a, i) => a + i.cantidad * i.precio_unit, 0));
+  const desde = Math.min(...ops.map(x => x.ts));
+  const err = ops.map(x => x.err).filter(Boolean).pop() || null;
+  const resumen = {id, etiqueta: etiquetaOrden(o), staff_id: S.ses.staff.id, total, guardada_en: new Date(desde).toISOString(), error: err,
+    productos: nuevos.map(i => `${i.cantidad}× ${i.nombre}${i.variante ? ' (' + i.variante + ')' : ''}`)};
+  hojaAutoriza('Descartar orden no enviada', `${etiquetaOrden(o)} · ${money(total)} · guardada ${ftime(desde)}${esDemo() ? ' · DEMO' : ''}`,
+    ['Orden duplicada', 'Ya se capturó otra vez', 'Cliente se fue', 'Era de prueba'], '', async (quien, pin, mot, d, cod, tel) => {
+      const r = await call('pos_descartar_pendiente', {p_orden: resumen, p_autoriza: quien, p_pin: pin, p_motivo: mot, p_codigo: cod, p_telefono: !!tel});
+      if (r.ok){
+        S.cola = S.cola.filter(x => !ops.includes(x)); S.colaAviso = null; guardaCola();
+        if (o.items.some(i => !i.pendiente)) await cargaOrdenes(true);     // la orden sí existe: solo se quitan los productos no enviados
+        else { delete S.ordenes[id]; if (o.tipo === 'mesa') S.mesasOcupadas = S.mesasOcupadas.filter(m => m !== o.mesa); }
+        toast('Orden descartada y anotada en la bitácora'); render();
+      }
+      return r;
+    }, null, {cancela: true, nota: 'Esta orden nunca llegó a la caja. Se quita de esta tablet y queda en la bitácora: qué era, de quién, cuándo, el motivo y quién autorizó.'});
 }
 // Anular una venta YA cobrada (solo el administrador, desde su sesión)
 function anularVenta(fecha, folio, despues){
@@ -1249,6 +1335,7 @@ async function vEntrada(){
   if (e.abierta || !e.requiere_entrada){ return continuarPOS(); }
   $('#ent').innerHTML = `<div class="card checa" id="entradaObl"><p class="muted" style="margin:0">${fdate(e.hoy)}</p><h1 style="margin:0">Hola, ${esc(e.staff.nombre)}</h1>
     <p class="estado-chk">Antes de tomar órdenes registra tu entrada.</p>
+    ${pendientes() ? `<div class="banner" id="entcola">Tienes ${pendientes()} operación(es) guardadas sin internet en esta tablet. No se pierden: se envían en cuanto registres tu entrada.</div>` : ''}
     <div class="reloj num" id="reloj"></div><p class="muted small" style="margin:0">Hora del servidor</p>
     ${e.pendientes.length ? `<div class="banner crit">Tienes una entrada sin salida (${e.pendientes.map(x => `${fdate(x.fecha)} ${horaAP(x.entrada)}`).join(', ')}). Queda como <b>salida pendiente</b>: la encargada o el administrador la corrigen.</div>` : ''}
     <button class="btn pri big block checabig" id="entOk">Registrar entrada</button><div class="msg" id="emsg"></div>
@@ -1441,10 +1528,22 @@ function barras(rows, lab, val){
   return `<div class="grid" style="gap:6px">${rows.map(r => `<div style="display:grid;grid-template-columns:110px minmax(0,1fr) 100px;gap:10px;align-items:center;font-size:14px">
     <span>${esc(lab(r))}</span><span style="height:16px;background:var(--sunk);border-radius:4px;overflow:hidden"><span style="display:block;height:100%;width:${(val(r) / max * 100).toFixed(1)}%;background:var(--accent);border-radius:4px"></span></span><b class="num" style="text-align:right">${money(val(r))}</b></div>`).join('')}</div>`;
 }
+// Órdenes atoradas en tablets: lo que cada tablet reporta como "Por enviar"
+async function pintaAtoradas(){
+  const box = $('#atoradas'); if (!box) return;
+  let d; try { d = await call('admin_pendientes_tablets'); } catch(e){ return; }
+  if (!$('#atoradas')) return;
+  const QUE = {pos_guardar_orden: 'Orden', pos_cobrar: 'Cobro', pos_imprimir: 'Impresión'};
+  box.innerHTML = `<div class="card" id="atocard" style="margin-bottom:14px"><h2 style="margin:0 0 6px">Órdenes atoradas en tablets</h2>
+    ${!d.length ? '<p class="muted" style="margin:0">Ninguna tablet tiene órdenes sin enviar. ✔</p>' : d.map(t => `<h3 style="margin:10px 0 4px">${esc(t.nombre || 'Tablet')} <span class="muted small">· último aviso ${ftime(t.ultimo_reporte)}${t.version ? ' · v' + esc(t.version) : ''}</span></h3>
+      ${tabla([['Qué', x => esc(QUE[x.fn] || x.fn) + (x.es_demo ? ' <span class="tag tdemo">DEMO</span>' : '')], ['Orden', x => esc(x.etiqueta || '—') + (x.en_base ? ' <span class="muted small">(sí está en la caja)</span>' : '')],
+        ['De', x => esc(x.de)], ['Guardada', x => ftime(x.guardada_en)], ['Importe', x => x.fn === 'pos_guardar_orden' ? money(x.total) : '—', 'n'], ['Problema', x => x.error ? `<span class="neg">${esc(x.error)}</span>` : '<span class="muted">Esperando internet o a que entre esa persona</span>', 'w']], t.items || [])}`).join('')}
+    ${d.length ? '<p class="note" style="margin:6px 0 0">Para quitarlas: en esa tablet entra con el usuario que la hizo. Si tiene más de 30 minutos aparece el botón <b>Descartar</b>; se autoriza con tu PIN (o por teléfono) y queda en la bitácora.</p>' : ''}</div>`;
+}
 async function aResumen(){
   const r = await reporte(); const h = hoyISO();
   const hoy = r.por_dia.find(d => d.fecha === h);
-  $('#abody').innerHTML = `${S.admin.demo ? '<div class="banner">Estás viendo datos DEMO.</div>' : ''}
+  $('#abody').innerHTML = `<div id="atoradas"></div>${S.admin.demo ? '<div class="banner">Estás viendo datos DEMO.</div>' : ''}
     <div class="grid kpis">
       <div class="kpi"><div class="l">Ventas del periodo</div><div class="v num">${money(r.ventas)}</div></div>
       <div class="kpi"><div class="l">Ventas de hoy</div><div class="v num">${money(hoy?.ventas || 0)}</div></div>
@@ -1462,7 +1561,7 @@ async function aResumen(){
     <h3>Anular una venta ya cobrada</h3><div class="card row"><input type="date" id="anf" class="cell w" value="${hoyISO()}"><input id="anfo" class="cell" inputmode="numeric" placeholder="Folio"><button class="btn cx" id="anb">Anular venta…</button>
       <span class="note" style="margin:0">Pide motivo, PIN y código. Se cancela y queda en la bitácora. Si ya entró a un corte, la diferencia se verá en ese corte.</span></div>`;
   $('#anb').onclick = () => anularVenta($('#anf').value || hoyISO(), $('#anfo').value, () => { S.admin.rep = S.admin.od = null; if (S.vista === 'admin' && S.admin.tab === 'resumen') aResumen(); });
-  ordenesDia();
+  ordenesDia(); pintaAtoradas();
 }
 const DSEM = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
 function cuandoVendes(r){
@@ -2171,6 +2270,7 @@ document.addEventListener('click', async e => {
   if (a === 'admin'){ S.vista = 'admin'; return render(); }
   if (a === 'rutina'){ S.vista = 'rutina'; return render(); }
   if (a === 'asistencia'){ S.vista = 'asistencia'; return render(); }
+  if (a === 'irEntrada'){ S.vista = 'entrada'; return render(); }
   if (a === 'checar'){ S.chk = {paso: 'nombre'}; return render(); }
   if (a === 'verErrores'){
     abreModal(`<div class="sheet"><h2>Operaciones no registradas</h2><p class="muted">Se hicieron sin internet y el servidor las rechazó. Captúralas de nuevo si hace falta.</p>
@@ -2187,5 +2287,5 @@ setInterval(() => { if (S.ses && !locked && S.vista === 'mapa' && S.online) pint
 /* ================= inicio ================= */
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 if (CFG.PRUEBAS) window.__pos = S; // solo en pruebas automáticas
-render();
+render(); reportaLuego();
 })();
